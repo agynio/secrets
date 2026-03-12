@@ -73,9 +73,10 @@ type UpdateSecretProviderInput struct {
 	Config      *json.RawMessage
 }
 
-type SecretProviderListResult struct {
-	SecretProviders []SecretProvider
-	NextPageToken   string
+type ListSecretProvidersParams struct {
+	PageSize  int32
+	PageToken string
+	Query     string
 }
 
 func (s *Store) CreateSecretProvider(ctx context.Context, input CreateSecretProviderInput) (SecretProvider, error) {
@@ -121,24 +122,19 @@ func (s *Store) DeleteSecretProvider(ctx context.Context, id uuid.UUID) error {
 	return nil
 }
 
-func (s *Store) ListSecretProviders(ctx context.Context, pageSize int32, pageToken, query string) (SecretProviderListResult, error) {
-	limit := normalizePageSize(pageSize)
-	offset := int64(0)
-	if pageToken != "" {
-		var err error
-		offset, err = decodePageToken(pageToken)
-		if err != nil {
-			return SecretProviderListResult{}, err
-		}
+func (s *Store) ListSecretProviders(ctx context.Context, params ListSecretProvidersParams) ([]SecretProvider, string, error) {
+	page, err := newPageParams(params.PageSize, params.PageToken)
+	if err != nil {
+		return nil, "", err
 	}
 
 	conditions := make([]string, 0, 1)
 	args := make([]any, 0, 4)
-	if query != "" {
-		pattern := "%" + query + "%"
+	if params.Query != "" {
+		pattern := "%" + escapeLike(params.Query) + "%"
 		start := len(args)
 		args = append(args, pattern, pattern)
-		conditions = append(conditions, fmt.Sprintf("(title ILIKE $%d OR description ILIKE $%d)", start+1, start+2))
+		conditions = append(conditions, fmt.Sprintf("(title ILIKE $%d ESCAPE '\\' OR description ILIKE $%d ESCAPE '\\')", start+1, start+2))
 	}
 
 	stmt := `SELECT id, title, description, type, config, created_at, updated_at FROM secret_providers`
@@ -146,37 +142,33 @@ func (s *Store) ListSecretProviders(ctx context.Context, pageSize int32, pageTok
 		stmt += " WHERE " + strings.Join(conditions, " AND ")
 	}
 	limitStart := len(args)
-	args = append(args, limit+1, offset)
+	args = append(args, page.Limit+1, page.Offset)
 	stmt += fmt.Sprintf(" ORDER BY created_at DESC, id DESC LIMIT $%d OFFSET $%d", limitStart+1, limitStart+2)
 
 	rows, err := s.pool.Query(ctx, stmt, args...)
 	if err != nil {
-		return SecretProviderListResult{}, err
+		return nil, "", err
 	}
 	defer rows.Close()
 
-	providers := make([]SecretProvider, 0, limit)
+	providers := make([]SecretProvider, 0, int(page.Limit))
 	for rows.Next() {
 		provider, err := scanSecretProvider(rows)
 		if err != nil {
-			return SecretProviderListResult{}, err
+			return nil, "", err
 		}
 		providers = append(providers, provider)
 	}
 	if rows.Err() != nil {
-		return SecretProviderListResult{}, rows.Err()
+		return nil, "", rows.Err()
 	}
 
-	nextToken := ""
-	if len(providers) > int(limit) {
-		providers = providers[:limit]
-		nextToken, err = encodePageToken(offset + int64(limit))
-		if err != nil {
-			return SecretProviderListResult{}, err
-		}
+	providers, nextToken, err := finalizePage(providers, page)
+	if err != nil {
+		return nil, "", err
 	}
 
-	return SecretProviderListResult{SecretProviders: providers, NextPageToken: nextToken}, nil
+	return providers, nextToken, nil
 }
 
 type CreateSecretInput struct {
@@ -193,9 +185,11 @@ type UpdateSecretInput struct {
 	RemoteName       *string
 }
 
-type SecretListResult struct {
-	Secrets       []Secret
-	NextPageToken string
+type ListSecretsParams struct {
+	PageSize         int32
+	PageToken        string
+	Query            string
+	SecretProviderID *uuid.UUID
 }
 
 func (s *Store) CreateSecret(ctx context.Context, input CreateSecretInput) (Secret, error) {
@@ -241,24 +235,24 @@ func (s *Store) DeleteSecret(ctx context.Context, id uuid.UUID) error {
 	return nil
 }
 
-func (s *Store) ListSecrets(ctx context.Context, pageSize int32, pageToken, query string) (SecretListResult, error) {
-	limit := normalizePageSize(pageSize)
-	offset := int64(0)
-	if pageToken != "" {
-		var err error
-		offset, err = decodePageToken(pageToken)
-		if err != nil {
-			return SecretListResult{}, err
-		}
+func (s *Store) ListSecrets(ctx context.Context, params ListSecretsParams) ([]Secret, string, error) {
+	page, err := newPageParams(params.PageSize, params.PageToken)
+	if err != nil {
+		return nil, "", err
 	}
 
-	conditions := make([]string, 0, 1)
-	args := make([]any, 0, 4)
-	if query != "" {
-		pattern := "%" + query + "%"
+	conditions := make([]string, 0, 2)
+	args := make([]any, 0, 5)
+	if params.SecretProviderID != nil {
+		start := len(args)
+		args = append(args, *params.SecretProviderID)
+		conditions = append(conditions, fmt.Sprintf("secret_provider_id = $%d", start+1))
+	}
+	if params.Query != "" {
+		pattern := "%" + escapeLike(params.Query) + "%"
 		start := len(args)
 		args = append(args, pattern, pattern)
-		conditions = append(conditions, fmt.Sprintf("(title ILIKE $%d OR description ILIKE $%d)", start+1, start+2))
+		conditions = append(conditions, fmt.Sprintf("(title ILIKE $%d ESCAPE '\\' OR description ILIKE $%d ESCAPE '\\')", start+1, start+2))
 	}
 
 	stmt := `SELECT id, title, description, secret_provider_id, remote_name, created_at, updated_at FROM secrets`
@@ -266,37 +260,33 @@ func (s *Store) ListSecrets(ctx context.Context, pageSize int32, pageToken, quer
 		stmt += " WHERE " + strings.Join(conditions, " AND ")
 	}
 	limitStart := len(args)
-	args = append(args, limit+1, offset)
+	args = append(args, page.Limit+1, page.Offset)
 	stmt += fmt.Sprintf(" ORDER BY created_at DESC, id DESC LIMIT $%d OFFSET $%d", limitStart+1, limitStart+2)
 
 	rows, err := s.pool.Query(ctx, stmt, args...)
 	if err != nil {
-		return SecretListResult{}, err
+		return nil, "", err
 	}
 	defer rows.Close()
 
-	secrets := make([]Secret, 0, limit)
+	secrets := make([]Secret, 0, int(page.Limit))
 	for rows.Next() {
 		secret, err := scanSecret(rows)
 		if err != nil {
-			return SecretListResult{}, err
+			return nil, "", err
 		}
 		secrets = append(secrets, secret)
 	}
 	if rows.Err() != nil {
-		return SecretListResult{}, rows.Err()
+		return nil, "", rows.Err()
 	}
 
-	nextToken := ""
-	if len(secrets) > int(limit) {
-		secrets = secrets[:limit]
-		nextToken, err = encodePageToken(offset + int64(limit))
-		if err != nil {
-			return SecretListResult{}, err
-		}
+	secrets, nextToken, err := finalizePage(secrets, page)
+	if err != nil {
+		return nil, "", err
 	}
 
-	return SecretListResult{Secrets: secrets, NextPageToken: nextToken}, nil
+	return secrets, nextToken, nil
 }
 
 func scanSecretProvider(row pgx.Row) (SecretProvider, error) {
@@ -321,11 +311,51 @@ func scanSecret(row pgx.Row) (Secret, error) {
 	return secret, nil
 }
 
+type pageParams struct {
+	Limit  int32
+	Offset int64
+}
+
+func newPageParams(pageSize int32, pageToken string) (pageParams, error) {
+	limit := NormalizePageSize(pageSize)
+	offset := int64(0)
+	if pageToken != "" {
+		var err error
+		offset, err = DecodePageToken(pageToken)
+		if err != nil {
+			return pageParams{}, err
+		}
+	}
+	return pageParams{Limit: limit, Offset: offset}, nil
+}
+
+func finalizePage[T any](items []T, params pageParams) ([]T, string, error) {
+	if len(items) <= int(params.Limit) {
+		return items, "", nil
+	}
+
+	nextToken, err := EncodePageToken(params.Offset + int64(params.Limit))
+	if err != nil {
+		return nil, "", err
+	}
+
+	return items[:params.Limit], nextToken, nil
+}
+
+func escapeLike(value string) string {
+	replacer := strings.NewReplacer(
+		"\\", "\\\\",
+		"%", "\\%",
+		"_", "\\_",
+	)
+	return replacer.Replace(value)
+}
+
 type pageToken struct {
 	Offset int64 `json:"offset"`
 }
 
-func encodePageToken(offset int64) (string, error) {
+func EncodePageToken(offset int64) (string, error) {
 	payload := pageToken{Offset: offset}
 	buf, err := json.Marshal(payload)
 	if err != nil {
@@ -334,7 +364,7 @@ func encodePageToken(offset int64) (string, error) {
 	return base64.RawURLEncoding.EncodeToString(buf), nil
 }
 
-func decodePageToken(token string) (int64, error) {
+func DecodePageToken(token string) (int64, error) {
 	if token == "" {
 		return 0, ErrInvalidPageToken
 	}
@@ -352,7 +382,7 @@ func decodePageToken(token string) (int64, error) {
 	return payload.Offset, nil
 }
 
-func normalizePageSize(size int32) int32 {
+func NormalizePageSize(size int32) int32 {
 	if size <= 0 {
 		return defaultPageSize
 	}

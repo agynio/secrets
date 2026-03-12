@@ -10,22 +10,38 @@ import (
 
 	secretsv1 "github.com/agynio/secrets/gen/go/agynio/api/secrets/v1"
 	"github.com/google/uuid"
-	"github.com/jackc/pgconn"
+	"github.com/jackc/pgx/v5/pgconn"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"github.com/agynio/secrets/internal/store"
-	"github.com/agynio/secrets/internal/vault"
 )
+
+type SecretStore interface {
+	CreateSecretProvider(ctx context.Context, input store.CreateSecretProviderInput) (store.SecretProvider, error)
+	GetSecretProvider(ctx context.Context, id uuid.UUID) (store.SecretProvider, error)
+	UpdateSecretProvider(ctx context.Context, id uuid.UUID, input store.UpdateSecretProviderInput) (store.SecretProvider, error)
+	DeleteSecretProvider(ctx context.Context, id uuid.UUID) error
+	ListSecretProviders(ctx context.Context, params store.ListSecretProvidersParams) ([]store.SecretProvider, string, error)
+	CreateSecret(ctx context.Context, input store.CreateSecretInput) (store.Secret, error)
+	GetSecret(ctx context.Context, id uuid.UUID) (store.Secret, error)
+	UpdateSecret(ctx context.Context, id uuid.UUID, input store.UpdateSecretInput) (store.Secret, error)
+	DeleteSecret(ctx context.Context, id uuid.UUID) error
+	ListSecrets(ctx context.Context, params store.ListSecretsParams) ([]store.Secret, string, error)
+}
+
+type VaultResolver interface {
+	ReadKV2(ctx context.Context, address, token, mount, path, key string) (string, error)
+}
 
 type Server struct {
 	secretsv1.UnimplementedSecretsServiceServer
-	store *store.Store
-	vault *vault.Client
+	store SecretStore
+	vault VaultResolver
 }
 
-func New(store *store.Store, vaultClient *vault.Client) *Server {
+func New(store SecretStore, vaultClient VaultResolver) *Server {
 	return &Server{store: store, vault: vaultClient}
 }
 
@@ -82,31 +98,19 @@ func (s *Server) UpdateSecretProvider(ctx context.Context, req *secretsv1.Update
 		return nil, toStatusError(err)
 	}
 
-	resolvedType := existing.Type
-	var typeUpdate *store.ProviderType
-	if req.Type != nil {
-		resolvedType, err = providerTypeFromProto(req.GetType())
-		if err != nil {
-			return nil, status.Errorf(codes.InvalidArgument, "type: %v", err)
-		}
-		typeUpdate = &resolvedType
-	}
-
 	var configUpdate *json.RawMessage
 	if req.Config != nil {
-		config, err := configFromProto(resolvedType, req.GetConfig())
+		config, err := configFromProto(existing.Type, req.GetConfig())
 		if err != nil {
 			return nil, status.Errorf(codes.InvalidArgument, "config: %v", err)
 		}
 		configUpdate = &config
-	} else if req.Type != nil {
-		return nil, status.Error(codes.InvalidArgument, "config must be provided when updating type")
 	}
 
 	provider, err := s.store.UpdateSecretProvider(ctx, providerID, store.UpdateSecretProviderInput{
 		Title:       req.Title,
 		Description: req.Description,
-		Type:        typeUpdate,
+		Type:        nil,
 		Config:      configUpdate,
 	})
 	if err != nil {
@@ -131,16 +135,19 @@ func (s *Server) DeleteSecretProvider(ctx context.Context, req *secretsv1.Delete
 }
 
 func (s *Server) ListSecretProviders(ctx context.Context, req *secretsv1.ListSecretProvidersRequest) (*secretsv1.ListSecretProvidersResponse, error) {
-	result, err := s.store.ListSecretProviders(ctx, req.GetPageSize(), req.GetPageToken(), req.GetQuery())
+	providers, nextToken, err := s.store.ListSecretProviders(ctx, store.ListSecretProvidersParams{
+		PageSize:  req.GetPageSize(),
+		PageToken: req.GetPageToken(),
+	})
 	if err != nil {
 		return nil, toStatusError(err)
 	}
 
 	resp := &secretsv1.ListSecretProvidersResponse{
-		SecretProviders: make([]*secretsv1.SecretProvider, len(result.SecretProviders)),
-		NextPageToken:   result.NextPageToken,
+		SecretProviders: make([]*secretsv1.SecretProvider, len(providers)),
+		NextPageToken:   nextToken,
 	}
-	for i, provider := range result.SecretProviders {
+	for i, provider := range providers {
 		protoProvider, err := toProtoSecretProvider(provider)
 		if err != nil {
 			return nil, status.Errorf(codes.Internal, "convert secret provider: %v", err)
@@ -231,16 +238,28 @@ func (s *Server) DeleteSecret(ctx context.Context, req *secretsv1.DeleteSecretRe
 }
 
 func (s *Server) ListSecrets(ctx context.Context, req *secretsv1.ListSecretsRequest) (*secretsv1.ListSecretsResponse, error) {
-	result, err := s.store.ListSecrets(ctx, req.GetPageSize(), req.GetPageToken(), req.GetQuery())
+	params := store.ListSecretsParams{
+		PageSize:  req.GetPageSize(),
+		PageToken: req.GetPageToken(),
+	}
+	if req.GetSecretProviderId() != "" {
+		providerID, err := parseUUID(req.GetSecretProviderId())
+		if err != nil {
+			return nil, status.Errorf(codes.InvalidArgument, "secret_provider_id: %v", err)
+		}
+		params.SecretProviderID = &providerID
+	}
+
+	secrets, nextToken, err := s.store.ListSecrets(ctx, params)
 	if err != nil {
 		return nil, toStatusError(err)
 	}
 
 	resp := &secretsv1.ListSecretsResponse{
-		Secrets:       make([]*secretsv1.Secret, len(result.Secrets)),
-		NextPageToken: result.NextPageToken,
+		Secrets:       make([]*secretsv1.Secret, len(secrets)),
+		NextPageToken: nextToken,
 	}
-	for i, secret := range result.Secrets {
+	for i, secret := range secrets {
 		resp.Secrets[i] = toProtoSecret(secret)
 	}
 	return resp, nil
@@ -266,11 +285,11 @@ func (s *Server) ResolveSecret(ctx context.Context, req *secretsv1.ResolveSecret
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "decode secret provider config: %v", err)
 	}
-	mount, path, key, err := parseVaultRemoteName(secret.RemoteName)
+	ref, err := parseVaultRemoteName(secret.RemoteName)
 	if err != nil {
 		return nil, status.Errorf(codes.InvalidArgument, "remote_name: %v", err)
 	}
-	value, err := s.vault.ReadKV2(ctx, config.Address, config.Token, mount, path, key)
+	value, err := s.vault.ReadKV2(ctx, config.Address, config.Token, ref.Mount, ref.Path, ref.Key)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "resolve vault secret: %v", err)
 	}
@@ -303,7 +322,7 @@ func vaultConfigFromProto(config *secretsv1.SecretProviderConfig) (vaultConfig, 
 	if config == nil {
 		return vaultConfig{}, fmt.Errorf("config must be provided")
 	}
-	switch cfg := config.Config.(type) {
+	switch cfg := config.GetProvider().(type) {
 	case *secretsv1.SecretProviderConfig_Vault:
 		if cfg.Vault == nil {
 			return vaultConfig{}, fmt.Errorf("vault config must be provided")
@@ -324,14 +343,9 @@ func vaultConfigFromProto(config *secretsv1.SecretProviderConfig) (vaultConfig, 
 
 func vaultConfigFromJSON(raw json.RawMessage) (vaultConfig, error) {
 	var cfg vaultConfig
+	// TODO: encrypt sensitive vault config fields at rest.
 	if err := json.Unmarshal(raw, &cfg); err != nil {
 		return vaultConfig{}, err
-	}
-	if cfg.Address == "" {
-		return vaultConfig{}, fmt.Errorf("vault config missing address")
-	}
-	if cfg.Token == "" {
-		return vaultConfig{}, fmt.Errorf("vault config missing token")
 	}
 	return cfg, nil
 }
@@ -380,7 +394,7 @@ func configToProto(providerType store.ProviderType, raw json.RawMessage) (*secre
 			return nil, err
 		}
 		return &secretsv1.SecretProviderConfig{
-			Config: &secretsv1.SecretProviderConfig_Vault{
+			Provider: &secretsv1.SecretProviderConfig_Vault{
 				Vault: &secretsv1.VaultConfig{
 					Address: cfg.Address,
 					Token:   cfg.Token,
@@ -412,20 +426,26 @@ func providerTypeToProto(value store.ProviderType) (secretsv1.SecretProviderType
 	}
 }
 
-func parseVaultRemoteName(remoteName string) (string, string, string, error) {
+type vaultRemoteRef struct {
+	Mount string
+	Path  string
+	Key   string
+}
+
+func parseVaultRemoteName(remoteName string) (vaultRemoteRef, error) {
 	parts := strings.Split(remoteName, "/")
 	if len(parts) < 3 {
-		return "", "", "", fmt.Errorf("remote_name must be <mount>/<path>/<key>")
+		return vaultRemoteRef{}, fmt.Errorf("remote_name must be <mount>/<path>/<key>")
 	}
 	for _, part := range parts {
 		if part == "" {
-			return "", "", "", fmt.Errorf("remote_name segments must be non-empty")
+			return vaultRemoteRef{}, fmt.Errorf("remote_name segments must be non-empty")
 		}
 	}
 	mount := parts[0]
 	key := parts[len(parts)-1]
 	path := strings.Join(parts[1:len(parts)-1], "/")
-	return mount, path, key, nil
+	return vaultRemoteRef{Mount: mount, Path: path, Key: key}, nil
 }
 
 func parseUUID(value string) (uuid.UUID, error) {

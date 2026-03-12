@@ -14,9 +14,6 @@ type Client struct {
 }
 
 func NewClient(httpClient *http.Client) *Client {
-	if httpClient == nil {
-		httpClient = http.DefaultClient
-	}
 	return &Client{httpClient: httpClient}
 }
 
