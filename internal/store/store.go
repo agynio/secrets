@@ -122,60 +122,15 @@ func (s *Store) DeleteSecretProvider(ctx context.Context, id uuid.UUID) error {
 }
 
 func (s *Store) ListSecretProviders(ctx context.Context, pageSize int32, pageToken, query string) (SecretProviderListResult, error) {
-	limit := normalizePageSize(pageSize)
-	offset := int64(0)
-	if pageToken != "" {
-		var err error
-		offset, err = decodePageToken(pageToken)
-		if err != nil {
-			return SecretProviderListResult{}, err
-		}
-	}
-
-	conditions := make([]string, 0, 1)
-	args := make([]any, 0, 4)
-	if query != "" {
-		pattern := "%" + query + "%"
-		start := len(args)
-		args = append(args, pattern, pattern)
-		conditions = append(conditions, fmt.Sprintf("(title ILIKE $%d OR description ILIKE $%d)", start+1, start+2))
-	}
-
-	stmt := `SELECT id, title, description, type, config, created_at, updated_at FROM secret_providers`
-	if len(conditions) > 0 {
-		stmt += " WHERE " + strings.Join(conditions, " AND ")
-	}
-	limitStart := len(args)
-	args = append(args, limit+1, offset)
-	stmt += fmt.Sprintf(" ORDER BY created_at DESC, id DESC LIMIT $%d OFFSET $%d", limitStart+1, limitStart+2)
-
-	rows, err := s.pool.Query(ctx, stmt, args...)
+	providers, nextToken, err := listWithPagination(ctx, s.pool, listQueryConfig[SecretProvider]{
+		BaseQuery:     `SELECT id, title, description, type, config, created_at, updated_at FROM secret_providers`,
+		OrderBy:       "created_at DESC, id DESC",
+		SearchColumns: []string{"title", "description"},
+		Scan:          scanSecretProvider,
+	}, pageSize, pageToken, query)
 	if err != nil {
 		return SecretProviderListResult{}, err
 	}
-	defer rows.Close()
-
-	providers := make([]SecretProvider, 0, limit)
-	for rows.Next() {
-		provider, err := scanSecretProvider(rows)
-		if err != nil {
-			return SecretProviderListResult{}, err
-		}
-		providers = append(providers, provider)
-	}
-	if rows.Err() != nil {
-		return SecretProviderListResult{}, rows.Err()
-	}
-
-	nextToken := ""
-	if len(providers) > int(limit) {
-		providers = providers[:limit]
-		nextToken, err = encodePageToken(offset + int64(limit))
-		if err != nil {
-			return SecretProviderListResult{}, err
-		}
-	}
-
 	return SecretProviderListResult{SecretProviders: providers, NextPageToken: nextToken}, nil
 }
 
@@ -242,60 +197,15 @@ func (s *Store) DeleteSecret(ctx context.Context, id uuid.UUID) error {
 }
 
 func (s *Store) ListSecrets(ctx context.Context, pageSize int32, pageToken, query string) (SecretListResult, error) {
-	limit := normalizePageSize(pageSize)
-	offset := int64(0)
-	if pageToken != "" {
-		var err error
-		offset, err = decodePageToken(pageToken)
-		if err != nil {
-			return SecretListResult{}, err
-		}
-	}
-
-	conditions := make([]string, 0, 1)
-	args := make([]any, 0, 4)
-	if query != "" {
-		pattern := "%" + query + "%"
-		start := len(args)
-		args = append(args, pattern, pattern)
-		conditions = append(conditions, fmt.Sprintf("(title ILIKE $%d OR description ILIKE $%d)", start+1, start+2))
-	}
-
-	stmt := `SELECT id, title, description, secret_provider_id, remote_name, created_at, updated_at FROM secrets`
-	if len(conditions) > 0 {
-		stmt += " WHERE " + strings.Join(conditions, " AND ")
-	}
-	limitStart := len(args)
-	args = append(args, limit+1, offset)
-	stmt += fmt.Sprintf(" ORDER BY created_at DESC, id DESC LIMIT $%d OFFSET $%d", limitStart+1, limitStart+2)
-
-	rows, err := s.pool.Query(ctx, stmt, args...)
+	secrets, nextToken, err := listWithPagination(ctx, s.pool, listQueryConfig[Secret]{
+		BaseQuery:     `SELECT id, title, description, secret_provider_id, remote_name, created_at, updated_at FROM secrets`,
+		OrderBy:       "created_at DESC, id DESC",
+		SearchColumns: []string{"title", "description"},
+		Scan:          scanSecret,
+	}, pageSize, pageToken, query)
 	if err != nil {
 		return SecretListResult{}, err
 	}
-	defer rows.Close()
-
-	secrets := make([]Secret, 0, limit)
-	for rows.Next() {
-		secret, err := scanSecret(rows)
-		if err != nil {
-			return SecretListResult{}, err
-		}
-		secrets = append(secrets, secret)
-	}
-	if rows.Err() != nil {
-		return SecretListResult{}, rows.Err()
-	}
-
-	nextToken := ""
-	if len(secrets) > int(limit) {
-		secrets = secrets[:limit]
-		nextToken, err = encodePageToken(offset + int64(limit))
-		if err != nil {
-			return SecretListResult{}, err
-		}
-	}
-
 	return SecretListResult{Secrets: secrets, NextPageToken: nextToken}, nil
 }
 
@@ -319,6 +229,85 @@ func scanSecret(row pgx.Row) (Secret, error) {
 		return Secret{}, err
 	}
 	return secret, nil
+}
+
+type listQueryConfig[T any] struct {
+	BaseQuery     string
+	OrderBy       string
+	SearchColumns []string
+	Scan          func(pgx.Row) (T, error)
+}
+
+func listWithPagination[T any](
+	ctx context.Context,
+	pool *pgxpool.Pool,
+	cfg listQueryConfig[T],
+	pageSize int32,
+	pageToken,
+	query string,
+) ([]T, string, error) {
+	limit := normalizePageSize(pageSize)
+	offset := int64(0)
+	if pageToken != "" {
+		var err error
+		offset, err = decodePageToken(pageToken)
+		if err != nil {
+			return nil, "", err
+		}
+	}
+
+	conditions := make([]string, 0, 1)
+	args := make([]any, 0, len(cfg.SearchColumns)+2)
+	if query != "" && len(cfg.SearchColumns) > 0 {
+		pattern := "%" + escapeLike(query) + "%"
+		start := len(args)
+		parts := make([]string, len(cfg.SearchColumns))
+		for i, column := range cfg.SearchColumns {
+			args = append(args, pattern)
+			parts[i] = fmt.Sprintf("%s ILIKE $%d ESCAPE '\\'", column, start+i+1)
+		}
+		conditions = append(conditions, "("+strings.Join(parts, " OR ")+")")
+	}
+
+	stmt := cfg.BaseQuery
+	if len(conditions) > 0 {
+		stmt += " WHERE " + strings.Join(conditions, " AND ")
+	}
+	limitIndex := len(args) + 1
+	offsetIndex := len(args) + 2
+	args = append(args, limit+1, offset)
+	stmt += fmt.Sprintf(" ORDER BY %s LIMIT $%d OFFSET $%d", cfg.OrderBy, limitIndex, offsetIndex)
+
+	rows, err := pool.Query(ctx, stmt, args...)
+	if err != nil {
+		return nil, "", err
+	}
+	defer rows.Close()
+
+	capacity := int(limit) + 1
+	items := make([]T, 0, capacity)
+	for rows.Next() {
+		item, err := cfg.Scan(rows)
+		if err != nil {
+			return nil, "", err
+		}
+		items = append(items, item)
+	}
+	if rows.Err() != nil {
+		return nil, "", rows.Err()
+	}
+
+	nextToken := ""
+	if len(items) > int(limit) {
+		items = items[:int(limit)]
+		var err error
+		nextToken, err = encodePageToken(offset + int64(limit))
+		if err != nil {
+			return nil, "", err
+		}
+	}
+
+	return items, nextToken, nil
 }
 
 type pageToken struct {
@@ -360,4 +349,13 @@ func normalizePageSize(size int32) int32 {
 		return maxPageSize
 	}
 	return size
+}
+
+func escapeLike(value string) string {
+	replacer := strings.NewReplacer(
+		"\\", "\\\\",
+		"%", "\\%",
+		"_", "\\_",
+	)
+	return replacer.Replace(value)
 }

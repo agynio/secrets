@@ -10,22 +10,38 @@ import (
 
 	secretsv1 "github.com/agynio/secrets/gen/go/agynio/api/secrets/v1"
 	"github.com/google/uuid"
-	"github.com/jackc/pgconn"
+	"github.com/jackc/pgx/v5/pgconn"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"github.com/agynio/secrets/internal/store"
-	"github.com/agynio/secrets/internal/vault"
 )
+
+type SecretStore interface {
+	CreateSecretProvider(ctx context.Context, input store.CreateSecretProviderInput) (store.SecretProvider, error)
+	GetSecretProvider(ctx context.Context, id uuid.UUID) (store.SecretProvider, error)
+	UpdateSecretProvider(ctx context.Context, id uuid.UUID, input store.UpdateSecretProviderInput) (store.SecretProvider, error)
+	DeleteSecretProvider(ctx context.Context, id uuid.UUID) error
+	ListSecretProviders(ctx context.Context, pageSize int32, pageToken, query string) (store.SecretProviderListResult, error)
+	CreateSecret(ctx context.Context, input store.CreateSecretInput) (store.Secret, error)
+	GetSecret(ctx context.Context, id uuid.UUID) (store.Secret, error)
+	UpdateSecret(ctx context.Context, id uuid.UUID, input store.UpdateSecretInput) (store.Secret, error)
+	DeleteSecret(ctx context.Context, id uuid.UUID) error
+	ListSecrets(ctx context.Context, pageSize int32, pageToken, query string) (store.SecretListResult, error)
+}
+
+type VaultResolver interface {
+	ReadKV2(ctx context.Context, address, token, mount, path, key string) (string, error)
+}
 
 type Server struct {
 	secretsv1.UnimplementedSecretsServiceServer
-	store *store.Store
-	vault *vault.Client
+	store SecretStore
+	vault VaultResolver
 }
 
-func New(store *store.Store, vaultClient *vault.Client) *Server {
+func New(store SecretStore, vaultClient VaultResolver) *Server {
 	return &Server{store: store, vault: vaultClient}
 }
 
@@ -266,11 +282,11 @@ func (s *Server) ResolveSecret(ctx context.Context, req *secretsv1.ResolveSecret
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "decode secret provider config: %v", err)
 	}
-	mount, path, key, err := parseVaultRemoteName(secret.RemoteName)
+	remote, err := parseVaultRemoteName(secret.RemoteName)
 	if err != nil {
 		return nil, status.Errorf(codes.InvalidArgument, "remote_name: %v", err)
 	}
-	value, err := s.vault.ReadKV2(ctx, config.Address, config.Token, mount, path, key)
+	value, err := s.vault.ReadKV2(ctx, config.Address, config.Token, remote.Mount, remote.Path, remote.Key)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "resolve vault secret: %v", err)
 	}
@@ -289,6 +305,7 @@ func configFromProto(providerType store.ProviderType, config *secretsv1.SecretPr
 		if err != nil {
 			return nil, err
 		}
+		// TODO: Vault tokens are stored in plaintext; encrypt at rest in a follow-up.
 		payload, err := json.Marshal(vaultCfg)
 		if err != nil {
 			return nil, err
@@ -326,12 +343,6 @@ func vaultConfigFromJSON(raw json.RawMessage) (vaultConfig, error) {
 	var cfg vaultConfig
 	if err := json.Unmarshal(raw, &cfg); err != nil {
 		return vaultConfig{}, err
-	}
-	if cfg.Address == "" {
-		return vaultConfig{}, fmt.Errorf("vault config missing address")
-	}
-	if cfg.Token == "" {
-		return vaultConfig{}, fmt.Errorf("vault config missing token")
 	}
 	return cfg, nil
 }
@@ -412,20 +423,26 @@ func providerTypeToProto(value store.ProviderType) (secretsv1.SecretProviderType
 	}
 }
 
-func parseVaultRemoteName(remoteName string) (string, string, string, error) {
+type vaultRemoteRef struct {
+	Mount string
+	Path  string
+	Key   string
+}
+
+func parseVaultRemoteName(remoteName string) (vaultRemoteRef, error) {
 	parts := strings.Split(remoteName, "/")
 	if len(parts) < 3 {
-		return "", "", "", fmt.Errorf("remote_name must be <mount>/<path>/<key>")
+		return vaultRemoteRef{}, fmt.Errorf("remote_name must be <mount>/<path>/<key>")
 	}
 	for _, part := range parts {
 		if part == "" {
-			return "", "", "", fmt.Errorf("remote_name segments must be non-empty")
+			return vaultRemoteRef{}, fmt.Errorf("remote_name segments must be non-empty")
 		}
 	}
 	mount := parts[0]
 	key := parts[len(parts)-1]
 	path := strings.Join(parts[1:len(parts)-1], "/")
-	return mount, path, key, nil
+	return vaultRemoteRef{Mount: mount, Path: path, Key: key}, nil
 }
 
 func parseUUID(value string) (uuid.UUID, error) {

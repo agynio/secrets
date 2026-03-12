@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
@@ -51,7 +52,7 @@ func run() error {
 	}
 
 	grpcServer := grpc.NewServer()
-	secretsv1.RegisterSecretsServiceServer(grpcServer, server.New(store.NewStore(pool), vault.NewClient(cfg.HTTPClient)))
+	secretsv1.RegisterSecretsServiceServer(grpcServer, server.New(store.NewStore(pool), vault.NewClient(http.DefaultClient)))
 
 	lis, err := net.Listen("tcp", cfg.GRPCAddress)
 	if err != nil {
