@@ -2,14 +2,12 @@ package config
 
 import (
 	"fmt"
-	"net/http"
 	"os"
 )
 
 type Config struct {
 	GRPCAddress string
 	DatabaseURL string
-	HTTPClient  *http.Client
 }
 
 func FromEnv() (Config, error) {
@@ -22,6 +20,5 @@ func FromEnv() (Config, error) {
 	if cfg.DatabaseURL == "" {
 		return Config{}, fmt.Errorf("DATABASE_URL must be set")
 	}
-	cfg.HTTPClient = http.DefaultClient
 	return cfg, nil
 }
