@@ -138,7 +138,7 @@ func (s *Server) ListSecretProviders(ctx context.Context, req *secretsv1.ListSec
 	providers, nextToken, err := s.store.ListSecretProviders(ctx, store.ListSecretProvidersParams{
 		PageSize:  req.GetPageSize(),
 		PageToken: req.GetPageToken(),
-		Query:     listQuery(req),
+		Query:     req.GetQuery(),
 	})
 	if err != nil {
 		return nil, toStatusError(err)
@@ -242,7 +242,7 @@ func (s *Server) ListSecrets(ctx context.Context, req *secretsv1.ListSecretsRequ
 	params := store.ListSecretsParams{
 		PageSize:  req.GetPageSize(),
 		PageToken: req.GetPageToken(),
-		Query:     listQuery(req),
+		Query:     req.GetQuery(),
 	}
 	if req.GetSecretProviderId() != "" {
 		providerID, err := parseUUID(req.GetSecretProviderId())
@@ -448,18 +448,6 @@ func parseVaultRemoteName(remoteName string) (vaultRemoteRef, error) {
 	key := parts[len(parts)-1]
 	path := strings.Join(parts[1:len(parts)-1], "/")
 	return vaultRemoteRef{Mount: mount, Path: path, Key: key}, nil
-}
-
-type queryRequest interface {
-	GetQuery() string
-}
-
-func listQuery(req any) string {
-	queryReq, ok := req.(queryRequest)
-	if !ok {
-		return ""
-	}
-	return queryReq.GetQuery()
 }
 
 func parseUUID(value string) (uuid.UUID, error) {

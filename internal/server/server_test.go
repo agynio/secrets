@@ -13,10 +13,10 @@ import (
 
 func TestParseVaultRemoteName(t *testing.T) {
 	tests := []struct {
-		name     string
-		input    string
-		want     vaultRemoteRef
-		wantErr  bool
+		name    string
+		input   string
+		want    vaultRemoteRef
+		wantErr bool
 	}{
 		{
 			name:  "three segments",
@@ -146,22 +146,22 @@ func TestToStatusError(t *testing.T) {
 			err:      store.ErrSecretNotFound,
 			wantCode: codes.NotFound,
 		},
-	{
-		name:     "foreign key",
-		err:      &pgconn.PgError{Code: "23503", Message: "fk"},
-		wantCode: codes.FailedPrecondition,
-	},
-	{
-		name:     "invalid page token",
-		err:      store.ErrInvalidPageToken,
-		wantCode: codes.InvalidArgument,
-	},
-	{
-		name:     "generic error",
-		err:      errors.New("boom"),
-		wantCode: codes.Internal,
-	},
-}
+		{
+			name:     "foreign key",
+			err:      &pgconn.PgError{Code: "23503", Message: "fk"},
+			wantCode: codes.FailedPrecondition,
+		},
+		{
+			name:     "invalid page token",
+			err:      store.ErrInvalidPageToken,
+			wantCode: codes.InvalidArgument,
+		},
+		{
+			name:     "generic error",
+			err:      errors.New("boom"),
+			wantCode: codes.Internal,
+		},
+	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
