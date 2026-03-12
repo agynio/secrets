@@ -138,7 +138,6 @@ func (s *Server) ListSecretProviders(ctx context.Context, req *secretsv1.ListSec
 	providers, nextToken, err := s.store.ListSecretProviders(ctx, store.ListSecretProvidersParams{
 		PageSize:  req.GetPageSize(),
 		PageToken: req.GetPageToken(),
-		Query:     req.GetQuery(),
 	})
 	if err != nil {
 		return nil, toStatusError(err)
@@ -242,7 +241,6 @@ func (s *Server) ListSecrets(ctx context.Context, req *secretsv1.ListSecretsRequ
 	params := store.ListSecretsParams{
 		PageSize:  req.GetPageSize(),
 		PageToken: req.GetPageToken(),
-		Query:     req.GetQuery(),
 	}
 	if req.GetSecretProviderId() != "" {
 		providerID, err := parseUUID(req.GetSecretProviderId())

@@ -76,7 +76,6 @@ type UpdateSecretProviderInput struct {
 type ListSecretProvidersParams struct {
 	PageSize  int32
 	PageToken string
-	Query     string
 }
 
 func (s *Store) CreateSecretProvider(ctx context.Context, input CreateSecretProviderInput) (SecretProvider, error) {
@@ -128,22 +127,9 @@ func (s *Store) ListSecretProviders(ctx context.Context, params ListSecretProvid
 		return nil, "", err
 	}
 
-	conditions := make([]string, 0, 1)
-	args := make([]any, 0, 4)
-	if params.Query != "" {
-		pattern := "%" + escapeLike(params.Query) + "%"
-		start := len(args)
-		args = append(args, pattern, pattern)
-		conditions = append(conditions, fmt.Sprintf("(title ILIKE $%d ESCAPE '\\' OR description ILIKE $%d ESCAPE '\\')", start+1, start+2))
-	}
-
-	stmt := `SELECT id, title, description, type, config, created_at, updated_at FROM secret_providers`
-	if len(conditions) > 0 {
-		stmt += " WHERE " + strings.Join(conditions, " AND ")
-	}
-	limitStart := len(args)
-	args = append(args, page.Limit+1, page.Offset)
-	stmt += fmt.Sprintf(" ORDER BY created_at DESC, id DESC LIMIT $%d OFFSET $%d", limitStart+1, limitStart+2)
+	stmt := "SELECT id, title, description, type, config, created_at, updated_at FROM secret_providers"
+	stmt += " ORDER BY created_at DESC, id DESC LIMIT $1 OFFSET $2"
+	args := []any{page.Limit + 1, page.Offset}
 
 	rows, err := s.pool.Query(ctx, stmt, args...)
 	if err != nil {
@@ -188,7 +174,6 @@ type UpdateSecretInput struct {
 type ListSecretsParams struct {
 	PageSize         int32
 	PageToken        string
-	Query            string
 	SecretProviderID *uuid.UUID
 }
 
@@ -242,17 +227,11 @@ func (s *Store) ListSecrets(ctx context.Context, params ListSecretsParams) ([]Se
 	}
 
 	conditions := make([]string, 0, 2)
-	args := make([]any, 0, 5)
+	args := make([]any, 0, 3)
 	if params.SecretProviderID != nil {
 		start := len(args)
 		args = append(args, *params.SecretProviderID)
 		conditions = append(conditions, fmt.Sprintf("secret_provider_id = $%d", start+1))
-	}
-	if params.Query != "" {
-		pattern := "%" + escapeLike(params.Query) + "%"
-		start := len(args)
-		args = append(args, pattern, pattern)
-		conditions = append(conditions, fmt.Sprintf("(title ILIKE $%d ESCAPE '\\' OR description ILIKE $%d ESCAPE '\\')", start+1, start+2))
 	}
 
 	stmt := `SELECT id, title, description, secret_provider_id, remote_name, created_at, updated_at FROM secrets`
@@ -340,15 +319,6 @@ func finalizePage[T any](items []T, params pageParams) ([]T, string, error) {
 	}
 
 	return items[:params.Limit], nextToken, nil
-}
-
-func escapeLike(value string) string {
-	replacer := strings.NewReplacer(
-		"\\", "\\\\",
-		"%", "\\%",
-		"_", "\\_",
-	)
-	return replacer.Replace(value)
 }
 
 type pageToken struct {
