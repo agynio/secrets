@@ -23,12 +23,12 @@ type SecretStore interface {
 	GetSecretProvider(ctx context.Context, id uuid.UUID) (store.SecretProvider, error)
 	UpdateSecretProvider(ctx context.Context, id uuid.UUID, input store.UpdateSecretProviderInput) (store.SecretProvider, error)
 	DeleteSecretProvider(ctx context.Context, id uuid.UUID) error
-	ListSecretProviders(ctx context.Context, pageSize int32, pageToken, query string) (store.SecretProviderListResult, error)
+	ListSecretProviders(ctx context.Context, params store.ListSecretProvidersParams) ([]store.SecretProvider, string, error)
 	CreateSecret(ctx context.Context, input store.CreateSecretInput) (store.Secret, error)
 	GetSecret(ctx context.Context, id uuid.UUID) (store.Secret, error)
 	UpdateSecret(ctx context.Context, id uuid.UUID, input store.UpdateSecretInput) (store.Secret, error)
 	DeleteSecret(ctx context.Context, id uuid.UUID) error
-	ListSecrets(ctx context.Context, pageSize int32, pageToken, query string) (store.SecretListResult, error)
+	ListSecrets(ctx context.Context, params store.ListSecretsParams) ([]store.Secret, string, error)
 }
 
 type VaultResolver interface {
@@ -98,31 +98,19 @@ func (s *Server) UpdateSecretProvider(ctx context.Context, req *secretsv1.Update
 		return nil, toStatusError(err)
 	}
 
-	resolvedType := existing.Type
-	var typeUpdate *store.ProviderType
-	if req.Type != nil {
-		resolvedType, err = providerTypeFromProto(req.GetType())
-		if err != nil {
-			return nil, status.Errorf(codes.InvalidArgument, "type: %v", err)
-		}
-		typeUpdate = &resolvedType
-	}
-
 	var configUpdate *json.RawMessage
 	if req.Config != nil {
-		config, err := configFromProto(resolvedType, req.GetConfig())
+		config, err := configFromProto(existing.Type, req.GetConfig())
 		if err != nil {
 			return nil, status.Errorf(codes.InvalidArgument, "config: %v", err)
 		}
 		configUpdate = &config
-	} else if req.Type != nil {
-		return nil, status.Error(codes.InvalidArgument, "config must be provided when updating type")
 	}
 
 	provider, err := s.store.UpdateSecretProvider(ctx, providerID, store.UpdateSecretProviderInput{
 		Title:       req.Title,
 		Description: req.Description,
-		Type:        typeUpdate,
+		Type:        nil,
 		Config:      configUpdate,
 	})
 	if err != nil {
@@ -147,16 +135,19 @@ func (s *Server) DeleteSecretProvider(ctx context.Context, req *secretsv1.Delete
 }
 
 func (s *Server) ListSecretProviders(ctx context.Context, req *secretsv1.ListSecretProvidersRequest) (*secretsv1.ListSecretProvidersResponse, error) {
-	result, err := s.store.ListSecretProviders(ctx, req.GetPageSize(), req.GetPageToken(), req.GetQuery())
+	providers, nextToken, err := s.store.ListSecretProviders(ctx, store.ListSecretProvidersParams{
+		PageSize:  req.GetPageSize(),
+		PageToken: req.GetPageToken(),
+	})
 	if err != nil {
 		return nil, toStatusError(err)
 	}
 
 	resp := &secretsv1.ListSecretProvidersResponse{
-		SecretProviders: make([]*secretsv1.SecretProvider, len(result.SecretProviders)),
-		NextPageToken:   result.NextPageToken,
+		SecretProviders: make([]*secretsv1.SecretProvider, len(providers)),
+		NextPageToken:   nextToken,
 	}
-	for i, provider := range result.SecretProviders {
+	for i, provider := range providers {
 		protoProvider, err := toProtoSecretProvider(provider)
 		if err != nil {
 			return nil, status.Errorf(codes.Internal, "convert secret provider: %v", err)
@@ -247,16 +238,28 @@ func (s *Server) DeleteSecret(ctx context.Context, req *secretsv1.DeleteSecretRe
 }
 
 func (s *Server) ListSecrets(ctx context.Context, req *secretsv1.ListSecretsRequest) (*secretsv1.ListSecretsResponse, error) {
-	result, err := s.store.ListSecrets(ctx, req.GetPageSize(), req.GetPageToken(), req.GetQuery())
+	params := store.ListSecretsParams{
+		PageSize:  req.GetPageSize(),
+		PageToken: req.GetPageToken(),
+	}
+	if req.GetSecretProviderId() != "" {
+		providerID, err := parseUUID(req.GetSecretProviderId())
+		if err != nil {
+			return nil, status.Errorf(codes.InvalidArgument, "secret_provider_id: %v", err)
+		}
+		params.SecretProviderID = &providerID
+	}
+
+	secrets, nextToken, err := s.store.ListSecrets(ctx, params)
 	if err != nil {
 		return nil, toStatusError(err)
 	}
 
 	resp := &secretsv1.ListSecretsResponse{
-		Secrets:       make([]*secretsv1.Secret, len(result.Secrets)),
-		NextPageToken: result.NextPageToken,
+		Secrets:       make([]*secretsv1.Secret, len(secrets)),
+		NextPageToken: nextToken,
 	}
-	for i, secret := range result.Secrets {
+	for i, secret := range secrets {
 		resp.Secrets[i] = toProtoSecret(secret)
 	}
 	return resp, nil
@@ -282,11 +285,11 @@ func (s *Server) ResolveSecret(ctx context.Context, req *secretsv1.ResolveSecret
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "decode secret provider config: %v", err)
 	}
-	remote, err := parseVaultRemoteName(secret.RemoteName)
+	ref, err := parseVaultRemoteName(secret.RemoteName)
 	if err != nil {
 		return nil, status.Errorf(codes.InvalidArgument, "remote_name: %v", err)
 	}
-	value, err := s.vault.ReadKV2(ctx, config.Address, config.Token, remote.Mount, remote.Path, remote.Key)
+	value, err := s.vault.ReadKV2(ctx, config.Address, config.Token, ref.Mount, ref.Path, ref.Key)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "resolve vault secret: %v", err)
 	}
@@ -305,7 +308,6 @@ func configFromProto(providerType store.ProviderType, config *secretsv1.SecretPr
 		if err != nil {
 			return nil, err
 		}
-		// TODO: Vault tokens are stored in plaintext; encrypt at rest in a follow-up.
 		payload, err := json.Marshal(vaultCfg)
 		if err != nil {
 			return nil, err
@@ -320,7 +322,7 @@ func vaultConfigFromProto(config *secretsv1.SecretProviderConfig) (vaultConfig, 
 	if config == nil {
 		return vaultConfig{}, fmt.Errorf("config must be provided")
 	}
-	switch cfg := config.Config.(type) {
+	switch cfg := config.GetProvider().(type) {
 	case *secretsv1.SecretProviderConfig_Vault:
 		if cfg.Vault == nil {
 			return vaultConfig{}, fmt.Errorf("vault config must be provided")
@@ -341,6 +343,7 @@ func vaultConfigFromProto(config *secretsv1.SecretProviderConfig) (vaultConfig, 
 
 func vaultConfigFromJSON(raw json.RawMessage) (vaultConfig, error) {
 	var cfg vaultConfig
+	// TODO: encrypt sensitive vault config fields at rest.
 	if err := json.Unmarshal(raw, &cfg); err != nil {
 		return vaultConfig{}, err
 	}
@@ -391,7 +394,7 @@ func configToProto(providerType store.ProviderType, raw json.RawMessage) (*secre
 			return nil, err
 		}
 		return &secretsv1.SecretProviderConfig{
-			Config: &secretsv1.SecretProviderConfig_Vault{
+			Provider: &secretsv1.SecretProviderConfig_Vault{
 				Vault: &secretsv1.VaultConfig{
 					Address: cfg.Address,
 					Token:   cfg.Token,

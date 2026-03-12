@@ -1,75 +1,58 @@
 # Secrets Service
 
-Secrets is a gRPC service that manages secret providers and secret metadata in
-Postgres, and resolves secret values from HashiCorp Vault KV v2.
+Secrets is a gRPC service for managing secret providers and secrets backed by
+PostgreSQL. It currently supports resolving secrets from HashiCorp Vault KV v2
+using a remote name in the form `<mount>/<path>/<key>`.
 
-## What it does
-- Stores secret providers (currently Vault) and secret metadata in Postgres.
-- Resolves secret values by reading Vault KV v2 paths like
-  `<mount>/<path>/<key>`.
-- Supports pagination and search on list APIs.
+## Build
 
-## Build & Run
+Proto stubs are generated via Buf and are gitignored under `gen/go`.
 
-### Prerequisites
-- Go 1.25.x
-- Postgres
-- Vault (for ResolveSecret)
-
-### Build
 ```bash
-make build
+buf generate buf.build/agynio/api --path agynio/api/secrets/v1
+go build ./...
 ```
 
-### Test & Lint
-```bash
-make test
-make lint
-```
+## Run
 
-### Run locally
-```bash
-export DATABASE_URL=postgres://user:pass@localhost:5432/secrets?sslmode=disable
-export GRPC_ADDRESS=:50051
+The service applies database migrations on startup and exposes the gRPC server
+on the configured address.
 
+```bash
+export DATABASE_URL='postgres://user:pass@localhost:5432/secrets?sslmode=disable'
+export GRPC_ADDRESS=':50051'
 go run ./cmd/secrets
 ```
 
-The service applies database migrations on startup and listens on
-`GRPC_ADDRESS` (defaults to `:50051`).
-
-### Generate protobuf stubs
-```bash
-make proto
-```
-This expects the secrets proto to be available in `buf.build/agynio/api`.
-
 ## Configuration
-| Variable | Required | Description |
-| --- | --- | --- |
-| `DATABASE_URL` | yes | Postgres connection string |
-| `GRPC_ADDRESS` | no | gRPC bind address (default `:50051`) |
 
-## Repository structure
-- `cmd/secrets` — main entrypoint
-- `internal/config` — environment parsing
-- `internal/store` — Postgres data access
-- `internal/server` — gRPC handlers and conversions
-- `internal/vault` — Vault KV v2 client
-- `migrations` — SQL migrations
-- `charts/secrets` — Helm chart
-- `gen/go` — generated protobuf stubs (gitignored)
+| Environment variable | Required | Default | Description |
+| --- | --- | --- | --- |
+| `DATABASE_URL` | Yes | - | PostgreSQL connection string. |
+| `GRPC_ADDRESS` | No | `:50051` | Address for the gRPC server to listen on. |
 
-## Helm chart
+## Repository Layout
 
-Install with a direct database URL:
+- `cmd/secrets` - service entrypoint.
+- `internal/server` - gRPC handlers and request validation.
+- `internal/store` - Postgres access layer and pagination helpers.
+- `internal/vault` - Vault KV v2 client.
+- `internal/db` / `migrations` - migration runner and SQL migrations.
+- `charts/secrets` - Helm chart for Kubernetes deployments.
+
+## Helm Chart
+
+The Helm chart lives in `charts/secrets` and supports setting the database URL
+inline or via an existing secret.
+
 ```bash
 helm install secrets charts/secrets \
   --set image.tag=0.1.0 \
-  --set database.url='postgres://user:pass@db:5432/secrets?sslmode=disable'
+  --set database.url='postgres://user:pass@postgres:5432/secrets?sslmode=disable'
 ```
 
-Or use an existing Secret:
+To use an existing secret instead of a plain URL:
+
 ```bash
 helm install secrets charts/secrets \
   --set image.tag=0.1.0 \
