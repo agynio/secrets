@@ -1,4 +1,7 @@
 *.local
 .env
 .DS_Store
-gen/
+dist/
+*.log
+tmp/
+.gen/

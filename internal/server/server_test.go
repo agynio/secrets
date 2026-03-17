@@ -4,7 +4,7 @@ import (
 	"errors"
 	"testing"
 
-	secretsv1 "github.com/agynio/secrets/gen/go/agynio/api/secrets/v1"
+	secretsv1 "github.com/agynio/secrets/.gen/go/agynio/api/secrets/v1"
 	"github.com/agynio/secrets/internal/store"
 	"github.com/jackc/pgx/v5/pgconn"
 	"google.golang.org/grpc/codes"
