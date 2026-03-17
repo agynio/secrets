@@ -11,7 +11,7 @@ import (
 	"os/signal"
 	"syscall"
 
-	secretsv1 "github.com/agynio/secrets/gen/go/agynio/api/secrets/v1"
+	secretsv1 "github.com/agynio/secrets/.gen/go/agynio/api/secrets/v1"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"google.golang.org/grpc"
 

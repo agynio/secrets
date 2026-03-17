@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	secretsv1 "github.com/agynio/secrets/gen/go/agynio/api/secrets/v1"
+	secretsv1 "github.com/agynio/secrets/.gen/go/agynio/api/secrets/v1"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgconn"
 	"google.golang.org/grpc/codes"
