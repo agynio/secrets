@@ -15,20 +15,19 @@ import (
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
-	"github.com/agynio/secrets/internal/calleridentity"
 	"github.com/agynio/secrets/internal/store"
 )
 
 type SecretStore interface {
 	CreateSecretProvider(ctx context.Context, input store.CreateSecretProviderInput) (store.SecretProvider, error)
-	GetSecretProvider(ctx context.Context, tenantID uuid.UUID, id uuid.UUID) (store.SecretProvider, error)
-	UpdateSecretProvider(ctx context.Context, tenantID uuid.UUID, id uuid.UUID, input store.UpdateSecretProviderInput) (store.SecretProvider, error)
-	DeleteSecretProvider(ctx context.Context, tenantID uuid.UUID, id uuid.UUID) error
+	GetSecretProvider(ctx context.Context, id uuid.UUID) (store.SecretProvider, error)
+	UpdateSecretProvider(ctx context.Context, id uuid.UUID, input store.UpdateSecretProviderInput) (store.SecretProvider, error)
+	DeleteSecretProvider(ctx context.Context, id uuid.UUID) error
 	ListSecretProviders(ctx context.Context, params store.ListSecretProvidersParams) ([]store.SecretProvider, string, error)
 	CreateSecret(ctx context.Context, input store.CreateSecretInput) (store.Secret, error)
-	GetSecret(ctx context.Context, tenantID uuid.UUID, id uuid.UUID) (store.Secret, error)
-	UpdateSecret(ctx context.Context, tenantID uuid.UUID, id uuid.UUID, input store.UpdateSecretInput) (store.Secret, error)
-	DeleteSecret(ctx context.Context, tenantID uuid.UUID, id uuid.UUID) error
+	GetSecret(ctx context.Context, id uuid.UUID) (store.Secret, error)
+	UpdateSecret(ctx context.Context, id uuid.UUID, input store.UpdateSecretInput) (store.Secret, error)
+	DeleteSecret(ctx context.Context, id uuid.UUID) error
 	ListSecrets(ctx context.Context, params store.ListSecretsParams) ([]store.Secret, string, error)
 }
 
@@ -47,9 +46,9 @@ func New(store SecretStore, vaultClient VaultResolver) *Server {
 }
 
 func (s *Server) CreateSecretProvider(ctx context.Context, req *secretsv1.CreateSecretProviderRequest) (*secretsv1.CreateSecretProviderResponse, error) {
-	caller, err := calleridentity.FromContext(ctx)
+	organizationID, err := parseUUID(req.GetOrganizationId())
 	if err != nil {
-		return nil, status.Error(codes.Unauthenticated, err.Error())
+		return nil, status.Errorf(codes.InvalidArgument, "organization_id: %v", err)
 	}
 
 	providerType, err := providerTypeFromProto(req.GetType())
@@ -62,11 +61,11 @@ func (s *Server) CreateSecretProvider(ctx context.Context, req *secretsv1.Create
 	}
 
 	provider, err := s.store.CreateSecretProvider(ctx, store.CreateSecretProviderInput{
-		TenantID:    caller.TenantID,
-		Title:       req.GetTitle(),
-		Description: req.GetDescription(),
-		Type:        providerType,
-		Config:      config,
+		OrganizationID: organizationID,
+		Title:          req.GetTitle(),
+		Description:    req.GetDescription(),
+		Type:           providerType,
+		Config:         config,
 	})
 	if err != nil {
 		return nil, toStatusError(err)
@@ -79,16 +78,11 @@ func (s *Server) CreateSecretProvider(ctx context.Context, req *secretsv1.Create
 }
 
 func (s *Server) GetSecretProvider(ctx context.Context, req *secretsv1.GetSecretProviderRequest) (*secretsv1.GetSecretProviderResponse, error) {
-	caller, err := calleridentity.FromContext(ctx)
-	if err != nil {
-		return nil, status.Error(codes.Unauthenticated, err.Error())
-	}
-
 	providerID, err := parseUUID(req.GetId())
 	if err != nil {
 		return nil, status.Errorf(codes.InvalidArgument, "id: %v", err)
 	}
-	provider, err := s.store.GetSecretProvider(ctx, caller.TenantID, providerID)
+	provider, err := s.store.GetSecretProvider(ctx, providerID)
 	if err != nil {
 		return nil, toStatusError(err)
 	}
@@ -100,17 +94,12 @@ func (s *Server) GetSecretProvider(ctx context.Context, req *secretsv1.GetSecret
 }
 
 func (s *Server) UpdateSecretProvider(ctx context.Context, req *secretsv1.UpdateSecretProviderRequest) (*secretsv1.UpdateSecretProviderResponse, error) {
-	caller, err := calleridentity.FromContext(ctx)
-	if err != nil {
-		return nil, status.Error(codes.Unauthenticated, err.Error())
-	}
-
 	providerID, err := parseUUID(req.GetId())
 	if err != nil {
 		return nil, status.Errorf(codes.InvalidArgument, "id: %v", err)
 	}
 
-	existing, err := s.store.GetSecretProvider(ctx, caller.TenantID, providerID)
+	existing, err := s.store.GetSecretProvider(ctx, providerID)
 	if err != nil {
 		return nil, toStatusError(err)
 	}
@@ -124,7 +113,7 @@ func (s *Server) UpdateSecretProvider(ctx context.Context, req *secretsv1.Update
 		configUpdate = &config
 	}
 
-	provider, err := s.store.UpdateSecretProvider(ctx, caller.TenantID, providerID, store.UpdateSecretProviderInput{
+	provider, err := s.store.UpdateSecretProvider(ctx, providerID, store.UpdateSecretProviderInput{
 		Title:       req.Title,
 		Description: req.Description,
 		Type:        nil,
@@ -141,31 +130,26 @@ func (s *Server) UpdateSecretProvider(ctx context.Context, req *secretsv1.Update
 }
 
 func (s *Server) DeleteSecretProvider(ctx context.Context, req *secretsv1.DeleteSecretProviderRequest) (*secretsv1.DeleteSecretProviderResponse, error) {
-	caller, err := calleridentity.FromContext(ctx)
-	if err != nil {
-		return nil, status.Error(codes.Unauthenticated, err.Error())
-	}
-
 	providerID, err := parseUUID(req.GetId())
 	if err != nil {
 		return nil, status.Errorf(codes.InvalidArgument, "id: %v", err)
 	}
-	if err := s.store.DeleteSecretProvider(ctx, caller.TenantID, providerID); err != nil {
+	if err := s.store.DeleteSecretProvider(ctx, providerID); err != nil {
 		return nil, toStatusError(err)
 	}
 	return &secretsv1.DeleteSecretProviderResponse{}, nil
 }
 
 func (s *Server) ListSecretProviders(ctx context.Context, req *secretsv1.ListSecretProvidersRequest) (*secretsv1.ListSecretProvidersResponse, error) {
-	caller, err := calleridentity.FromContext(ctx)
+	organizationID, err := parseUUID(req.GetOrganizationId())
 	if err != nil {
-		return nil, status.Error(codes.Unauthenticated, err.Error())
+		return nil, status.Errorf(codes.InvalidArgument, "organization_id: %v", err)
 	}
 
 	providers, nextToken, err := s.store.ListSecretProviders(ctx, store.ListSecretProvidersParams{
-		TenantID:  caller.TenantID,
-		PageSize:  req.GetPageSize(),
-		PageToken: req.GetPageToken(),
+		OrganizationID: organizationID,
+		PageSize:       req.GetPageSize(),
+		PageToken:      req.GetPageToken(),
 	})
 	if err != nil {
 		return nil, toStatusError(err)
@@ -186,9 +170,9 @@ func (s *Server) ListSecretProviders(ctx context.Context, req *secretsv1.ListSec
 }
 
 func (s *Server) CreateSecret(ctx context.Context, req *secretsv1.CreateSecretRequest) (*secretsv1.CreateSecretResponse, error) {
-	caller, err := calleridentity.FromContext(ctx)
+	organizationID, err := parseUUID(req.GetOrganizationId())
 	if err != nil {
-		return nil, status.Error(codes.Unauthenticated, err.Error())
+		return nil, status.Errorf(codes.InvalidArgument, "organization_id: %v", err)
 	}
 
 	providerID, err := parseUUID(req.GetSecretProviderId())
@@ -199,7 +183,7 @@ func (s *Server) CreateSecret(ctx context.Context, req *secretsv1.CreateSecretRe
 		return nil, status.Error(codes.InvalidArgument, "remote_name must be provided")
 	}
 	secret, err := s.store.CreateSecret(ctx, store.CreateSecretInput{
-		TenantID:         caller.TenantID,
+		OrganizationID:   organizationID,
 		Title:            req.GetTitle(),
 		Description:      req.GetDescription(),
 		SecretProviderID: providerID,
@@ -213,16 +197,11 @@ func (s *Server) CreateSecret(ctx context.Context, req *secretsv1.CreateSecretRe
 }
 
 func (s *Server) GetSecret(ctx context.Context, req *secretsv1.GetSecretRequest) (*secretsv1.GetSecretResponse, error) {
-	caller, err := calleridentity.FromContext(ctx)
-	if err != nil {
-		return nil, status.Error(codes.Unauthenticated, err.Error())
-	}
-
 	secretID, err := parseUUID(req.GetId())
 	if err != nil {
 		return nil, status.Errorf(codes.InvalidArgument, "id: %v", err)
 	}
-	secret, err := s.store.GetSecret(ctx, caller.TenantID, secretID)
+	secret, err := s.store.GetSecret(ctx, secretID)
 	if err != nil {
 		return nil, toStatusError(err)
 	}
@@ -230,11 +209,6 @@ func (s *Server) GetSecret(ctx context.Context, req *secretsv1.GetSecretRequest)
 }
 
 func (s *Server) UpdateSecret(ctx context.Context, req *secretsv1.UpdateSecretRequest) (*secretsv1.UpdateSecretResponse, error) {
-	caller, err := calleridentity.FromContext(ctx)
-	if err != nil {
-		return nil, status.Error(codes.Unauthenticated, err.Error())
-	}
-
 	secretID, err := parseUUID(req.GetId())
 	if err != nil {
 		return nil, status.Errorf(codes.InvalidArgument, "id: %v", err)
@@ -258,7 +232,7 @@ func (s *Server) UpdateSecret(ctx context.Context, req *secretsv1.UpdateSecretRe
 		remoteName = &value
 	}
 
-	secret, err := s.store.UpdateSecret(ctx, caller.TenantID, secretID, store.UpdateSecretInput{
+	secret, err := s.store.UpdateSecret(ctx, secretID, store.UpdateSecretInput{
 		Title:            req.Title,
 		Description:      req.Description,
 		SecretProviderID: providerID,
@@ -271,31 +245,26 @@ func (s *Server) UpdateSecret(ctx context.Context, req *secretsv1.UpdateSecretRe
 }
 
 func (s *Server) DeleteSecret(ctx context.Context, req *secretsv1.DeleteSecretRequest) (*secretsv1.DeleteSecretResponse, error) {
-	caller, err := calleridentity.FromContext(ctx)
-	if err != nil {
-		return nil, status.Error(codes.Unauthenticated, err.Error())
-	}
-
 	secretID, err := parseUUID(req.GetId())
 	if err != nil {
 		return nil, status.Errorf(codes.InvalidArgument, "id: %v", err)
 	}
-	if err := s.store.DeleteSecret(ctx, caller.TenantID, secretID); err != nil {
+	if err := s.store.DeleteSecret(ctx, secretID); err != nil {
 		return nil, toStatusError(err)
 	}
 	return &secretsv1.DeleteSecretResponse{}, nil
 }
 
 func (s *Server) ListSecrets(ctx context.Context, req *secretsv1.ListSecretsRequest) (*secretsv1.ListSecretsResponse, error) {
-	caller, err := calleridentity.FromContext(ctx)
+	organizationID, err := parseUUID(req.GetOrganizationId())
 	if err != nil {
-		return nil, status.Error(codes.Unauthenticated, err.Error())
+		return nil, status.Errorf(codes.InvalidArgument, "organization_id: %v", err)
 	}
 
 	params := store.ListSecretsParams{
-		TenantID:  caller.TenantID,
-		PageSize:  req.GetPageSize(),
-		PageToken: req.GetPageToken(),
+		OrganizationID: organizationID,
+		PageSize:       req.GetPageSize(),
+		PageToken:      req.GetPageToken(),
 	}
 	if req.GetSecretProviderId() != "" {
 		providerID, err := parseUUID(req.GetSecretProviderId())
@@ -321,20 +290,15 @@ func (s *Server) ListSecrets(ctx context.Context, req *secretsv1.ListSecretsRequ
 }
 
 func (s *Server) ResolveSecret(ctx context.Context, req *secretsv1.ResolveSecretRequest) (*secretsv1.ResolveSecretResponse, error) {
-	caller, err := calleridentity.FromContext(ctx)
-	if err != nil {
-		return nil, status.Error(codes.Unauthenticated, err.Error())
-	}
-
 	secretID, err := parseUUID(req.GetId())
 	if err != nil {
 		return nil, status.Errorf(codes.InvalidArgument, "id: %v", err)
 	}
-	secret, err := s.store.GetSecret(ctx, caller.TenantID, secretID)
+	secret, err := s.store.GetSecret(ctx, secretID)
 	if err != nil {
 		return nil, toStatusError(err)
 	}
-	provider, err := s.store.GetSecretProvider(ctx, caller.TenantID, secret.SecretProviderID)
+	provider, err := s.store.GetSecretProvider(ctx, secret.SecretProviderID)
 	if err != nil {
 		return nil, toStatusError(err)
 	}

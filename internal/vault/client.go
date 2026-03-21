@@ -30,7 +30,9 @@ func (c *Client) ReadKV2(ctx context.Context, address, token, mount, path, key s
 	if err != nil {
 		return "", fmt.Errorf("vault request: %w", err)
 	}
-	defer response.Body.Close()
+	defer func() {
+		_ = response.Body.Close()
+	}()
 
 	if response.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(response.Body)

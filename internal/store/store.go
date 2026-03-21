@@ -32,19 +32,19 @@ const (
 )
 
 type SecretProvider struct {
-	ID          uuid.UUID
-	TenantID    uuid.UUID
-	Title       string
-	Description string
-	Type        ProviderType
-	Config      json.RawMessage
-	CreatedAt   time.Time
-	UpdatedAt   time.Time
+	ID             uuid.UUID
+	OrganizationID uuid.UUID
+	Title          string
+	Description    string
+	Type           ProviderType
+	Config         json.RawMessage
+	CreatedAt      time.Time
+	UpdatedAt      time.Time
 }
 
 type Secret struct {
 	ID               uuid.UUID
-	TenantID         uuid.UUID
+	OrganizationID   uuid.UUID
 	Title            string
 	Description      string
 	SecretProviderID uuid.UUID
@@ -62,11 +62,11 @@ func NewStore(pool *pgxpool.Pool) *Store {
 }
 
 type CreateSecretProviderInput struct {
-	TenantID    uuid.UUID
-	Title       string
-	Description string
-	Type        ProviderType
-	Config      json.RawMessage
+	OrganizationID uuid.UUID
+	Title          string
+	Description    string
+	Type           ProviderType
+	Config         json.RawMessage
 }
 
 type UpdateSecretProviderInput struct {
@@ -77,46 +77,46 @@ type UpdateSecretProviderInput struct {
 }
 
 type ListSecretProvidersParams struct {
-	TenantID  uuid.UUID
-	PageSize  int32
-	PageToken string
+	OrganizationID uuid.UUID
+	PageSize       int32
+	PageToken      string
 }
 
 func (s *Store) CreateSecretProvider(ctx context.Context, input CreateSecretProviderInput) (SecretProvider, error) {
 	row := s.pool.QueryRow(ctx, `
-		INSERT INTO secret_providers (tenant_id, title, description, type, config)
+		INSERT INTO secret_providers (organization_id, title, description, type, config)
 		VALUES ($1, $2, $3, $4, $5)
-		RETURNING id, tenant_id, title, description, type, config, created_at, updated_at
-	`, input.TenantID, input.Title, input.Description, input.Type, input.Config)
+		RETURNING id, organization_id, title, description, type, config, created_at, updated_at
+	`, input.OrganizationID, input.Title, input.Description, input.Type, input.Config)
 	return scanSecretProvider(row)
 }
 
-func (s *Store) GetSecretProvider(ctx context.Context, tenantID uuid.UUID, id uuid.UUID) (SecretProvider, error) {
+func (s *Store) GetSecretProvider(ctx context.Context, id uuid.UUID) (SecretProvider, error) {
 	row := s.pool.QueryRow(ctx, `
-		SELECT id, tenant_id, title, description, type, config, created_at, updated_at
+		SELECT id, organization_id, title, description, type, config, created_at, updated_at
 		FROM secret_providers
-		WHERE tenant_id = $1 AND id = $2
-	`, tenantID, id)
+		WHERE id = $1
+	`, id)
 	return scanSecretProvider(row)
 }
 
-func (s *Store) UpdateSecretProvider(ctx context.Context, tenantID uuid.UUID, id uuid.UUID, input UpdateSecretProviderInput) (SecretProvider, error) {
+func (s *Store) UpdateSecretProvider(ctx context.Context, id uuid.UUID, input UpdateSecretProviderInput) (SecretProvider, error) {
 	row := s.pool.QueryRow(ctx, `
 		UPDATE secret_providers
-		SET title = COALESCE($3, title),
-			description = COALESCE($4, description),
-			type = COALESCE($5, type),
-			config = COALESCE($6, config),
+		SET title = COALESCE($2, title),
+			description = COALESCE($3, description),
+			type = COALESCE($4, type),
+			config = COALESCE($5, config),
 			updated_at = NOW()
-		WHERE tenant_id = $1 AND id = $2
-		RETURNING id, tenant_id, title, description, type, config, created_at, updated_at
-	`, tenantID, id, input.Title, input.Description, input.Type, input.Config)
+		WHERE id = $1
+		RETURNING id, organization_id, title, description, type, config, created_at, updated_at
+	`, id, input.Title, input.Description, input.Type, input.Config)
 	return scanSecretProvider(row)
 }
 
-func (s *Store) DeleteSecretProvider(ctx context.Context, tenantID uuid.UUID, id uuid.UUID) error {
+func (s *Store) DeleteSecretProvider(ctx context.Context, id uuid.UUID) error {
 	var deletedID uuid.UUID
-	if err := s.pool.QueryRow(ctx, `DELETE FROM secret_providers WHERE tenant_id = $1 AND id = $2 RETURNING id`, tenantID, id).Scan(&deletedID); err != nil {
+	if err := s.pool.QueryRow(ctx, `DELETE FROM secret_providers WHERE id = $1 RETURNING id`, id).Scan(&deletedID); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return ErrSecretProviderNotFound
 		}
@@ -131,9 +131,9 @@ func (s *Store) ListSecretProviders(ctx context.Context, params ListSecretProvid
 		return nil, "", err
 	}
 
-	stmt := "SELECT id, tenant_id, title, description, type, config, created_at, updated_at FROM secret_providers"
-	stmt += " WHERE tenant_id = $1 ORDER BY created_at DESC, id DESC LIMIT $2 OFFSET $3"
-	args := []any{params.TenantID, page.Limit + 1, page.Offset}
+	stmt := "SELECT id, organization_id, title, description, type, config, created_at, updated_at FROM secret_providers"
+	stmt += " WHERE organization_id = $1 ORDER BY created_at DESC, id DESC LIMIT $2 OFFSET $3"
+	args := []any{params.OrganizationID, page.Limit + 1, page.Offset}
 
 	rows, err := s.pool.Query(ctx, stmt, args...)
 	if err != nil {
@@ -162,7 +162,7 @@ func (s *Store) ListSecretProviders(ctx context.Context, params ListSecretProvid
 }
 
 type CreateSecretInput struct {
-	TenantID         uuid.UUID
+	OrganizationID   uuid.UUID
 	Title            string
 	Description      string
 	SecretProviderID uuid.UUID
@@ -177,7 +177,7 @@ type UpdateSecretInput struct {
 }
 
 type ListSecretsParams struct {
-	TenantID         uuid.UUID
+	OrganizationID   uuid.UUID
 	PageSize         int32
 	PageToken        string
 	SecretProviderID *uuid.UUID
@@ -185,39 +185,39 @@ type ListSecretsParams struct {
 
 func (s *Store) CreateSecret(ctx context.Context, input CreateSecretInput) (Secret, error) {
 	row := s.pool.QueryRow(ctx, `
-		INSERT INTO secrets (tenant_id, title, description, secret_provider_id, remote_name)
+		INSERT INTO secrets (organization_id, title, description, secret_provider_id, remote_name)
 		VALUES ($1, $2, $3, $4, $5)
-		RETURNING id, tenant_id, title, description, secret_provider_id, remote_name, created_at, updated_at
-	`, input.TenantID, input.Title, input.Description, input.SecretProviderID, input.RemoteName)
+		RETURNING id, organization_id, title, description, secret_provider_id, remote_name, created_at, updated_at
+	`, input.OrganizationID, input.Title, input.Description, input.SecretProviderID, input.RemoteName)
 	return scanSecret(row)
 }
 
-func (s *Store) GetSecret(ctx context.Context, tenantID uuid.UUID, id uuid.UUID) (Secret, error) {
+func (s *Store) GetSecret(ctx context.Context, id uuid.UUID) (Secret, error) {
 	row := s.pool.QueryRow(ctx, `
-		SELECT id, tenant_id, title, description, secret_provider_id, remote_name, created_at, updated_at
+		SELECT id, organization_id, title, description, secret_provider_id, remote_name, created_at, updated_at
 		FROM secrets
-		WHERE tenant_id = $1 AND id = $2
-	`, tenantID, id)
+		WHERE id = $1
+	`, id)
 	return scanSecret(row)
 }
 
-func (s *Store) UpdateSecret(ctx context.Context, tenantID uuid.UUID, id uuid.UUID, input UpdateSecretInput) (Secret, error) {
+func (s *Store) UpdateSecret(ctx context.Context, id uuid.UUID, input UpdateSecretInput) (Secret, error) {
 	row := s.pool.QueryRow(ctx, `
 		UPDATE secrets
-		SET title = COALESCE($3, title),
-			description = COALESCE($4, description),
-			secret_provider_id = COALESCE($5, secret_provider_id),
-			remote_name = COALESCE($6, remote_name),
+		SET title = COALESCE($2, title),
+			description = COALESCE($3, description),
+			secret_provider_id = COALESCE($4, secret_provider_id),
+			remote_name = COALESCE($5, remote_name),
 			updated_at = NOW()
-		WHERE tenant_id = $1 AND id = $2
-		RETURNING id, tenant_id, title, description, secret_provider_id, remote_name, created_at, updated_at
-	`, tenantID, id, input.Title, input.Description, input.SecretProviderID, input.RemoteName)
+		WHERE id = $1
+		RETURNING id, organization_id, title, description, secret_provider_id, remote_name, created_at, updated_at
+	`, id, input.Title, input.Description, input.SecretProviderID, input.RemoteName)
 	return scanSecret(row)
 }
 
-func (s *Store) DeleteSecret(ctx context.Context, tenantID uuid.UUID, id uuid.UUID) error {
+func (s *Store) DeleteSecret(ctx context.Context, id uuid.UUID) error {
 	var deletedID uuid.UUID
-	if err := s.pool.QueryRow(ctx, `DELETE FROM secrets WHERE tenant_id = $1 AND id = $2 RETURNING id`, tenantID, id).Scan(&deletedID); err != nil {
+	if err := s.pool.QueryRow(ctx, `DELETE FROM secrets WHERE id = $1 RETURNING id`, id).Scan(&deletedID); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return ErrSecretNotFound
 		}
@@ -232,14 +232,14 @@ func (s *Store) ListSecrets(ctx context.Context, params ListSecretsParams) ([]Se
 		return nil, "", err
 	}
 
-	conditions := []string{"tenant_id = $1"}
-	args := []any{params.TenantID}
+	conditions := []string{"organization_id = $1"}
+	args := []any{params.OrganizationID}
 	if params.SecretProviderID != nil {
 		args = append(args, *params.SecretProviderID)
 		conditions = append(conditions, fmt.Sprintf("secret_provider_id = $%d", len(args)))
 	}
 
-	stmt := `SELECT id, tenant_id, title, description, secret_provider_id, remote_name, created_at, updated_at FROM secrets`
+	stmt := `SELECT id, organization_id, title, description, secret_provider_id, remote_name, created_at, updated_at FROM secrets`
 	stmt += " WHERE " + strings.Join(conditions, " AND ")
 	limitStart := len(args)
 	args = append(args, page.Limit+1, page.Offset)
@@ -273,7 +273,7 @@ func (s *Store) ListSecrets(ctx context.Context, params ListSecretsParams) ([]Se
 
 func scanSecretProvider(row pgx.Row) (SecretProvider, error) {
 	var provider SecretProvider
-	if err := row.Scan(&provider.ID, &provider.TenantID, &provider.Title, &provider.Description, &provider.Type, &provider.Config, &provider.CreatedAt, &provider.UpdatedAt); err != nil {
+	if err := row.Scan(&provider.ID, &provider.OrganizationID, &provider.Title, &provider.Description, &provider.Type, &provider.Config, &provider.CreatedAt, &provider.UpdatedAt); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return SecretProvider{}, ErrSecretProviderNotFound
 		}
@@ -284,7 +284,7 @@ func scanSecretProvider(row pgx.Row) (SecretProvider, error) {
 
 func scanSecret(row pgx.Row) (Secret, error) {
 	var secret Secret
-	if err := row.Scan(&secret.ID, &secret.TenantID, &secret.Title, &secret.Description, &secret.SecretProviderID, &secret.RemoteName, &secret.CreatedAt, &secret.UpdatedAt); err != nil {
+	if err := row.Scan(&secret.ID, &secret.OrganizationID, &secret.Title, &secret.Description, &secret.SecretProviderID, &secret.RemoteName, &secret.CreatedAt, &secret.UpdatedAt); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return Secret{}, ErrSecretNotFound
 		}
