@@ -17,7 +17,6 @@ import (
 func TestGetSecretProviderRequiresID(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	ctx = contextWithTenant(ctx)
 
 	conn, err := grpc.NewClient(secretsAddress, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
@@ -41,7 +40,7 @@ func TestGetSecretProviderRequiresID(t *testing.T) {
 	}
 }
 
-func TestMissingTenantMetadataUnauthenticated(t *testing.T) {
+func TestListSecretProvidersUsesOrganizationID(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
@@ -53,16 +52,8 @@ func TestMissingTenantMetadataUnauthenticated(t *testing.T) {
 
 	client := secretsv1.NewSecretsServiceClient(conn)
 
-	_, err = client.GetSecretProvider(ctx, &secretsv1.GetSecretProviderRequest{Id: testTenantID})
-	if err == nil {
-		t.Fatal("expected unauthenticated error")
-	}
-
-	st, ok := status.FromError(err)
-	if !ok {
-		t.Fatalf("expected gRPC status error, got %v", err)
-	}
-	if st.Code() != codes.Unauthenticated {
-		t.Fatalf("expected Unauthenticated, got %s: %s", st.Code(), st.Message())
+	_, err = client.ListSecretProviders(ctx, &secretsv1.ListSecretProvidersRequest{OrganizationId: testOrganizationID})
+	if err != nil {
+		t.Fatalf("list secret providers: %v", err)
 	}
 }

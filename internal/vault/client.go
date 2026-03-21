@@ -30,10 +30,15 @@ func (c *Client) ReadKV2(ctx context.Context, address, token, mount, path, key s
 	if err != nil {
 		return "", fmt.Errorf("vault request: %w", err)
 	}
-	defer response.Body.Close()
+	body, err := io.ReadAll(response.Body)
+	if err != nil {
+		return "", fmt.Errorf("read vault response: %w", err)
+	}
+	if err := response.Body.Close(); err != nil {
+		return "", fmt.Errorf("close vault response: %w", err)
+	}
 
 	if response.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(response.Body)
 		message := strings.TrimSpace(string(body))
 		if message == "" {
 			message = response.Status
@@ -46,7 +51,7 @@ func (c *Client) ReadKV2(ctx context.Context, address, token, mount, path, key s
 			Data map[string]any `json:"data"`
 		} `json:"data"`
 	}
-	if err := json.NewDecoder(response.Body).Decode(&payload); err != nil {
+	if err := json.Unmarshal(body, &payload); err != nil {
 		return "", fmt.Errorf("decode vault response: %w", err)
 	}
 	value, ok := payload.Data.Data[key]
