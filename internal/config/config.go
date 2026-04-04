@@ -6,8 +6,8 @@ import (
 )
 
 type Config struct {
-	GRPCAddress string
-	DatabaseURL string
+	GRPCAddress       string
+	DatabaseURL       string
 	EncryptionKeyFile string
 }
 

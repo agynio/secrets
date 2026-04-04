@@ -6,6 +6,7 @@ import (
 
 	secretsv1 "github.com/agynio/secrets/gen/go/agynio/api/secrets/v1"
 	"github.com/agynio/secrets/internal/store"
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgconn"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -147,6 +148,11 @@ func TestToStatusError(t *testing.T) {
 			wantCode: codes.NotFound,
 		},
 		{
+			name:     "image pull secret not found",
+			err:      store.ErrImagePullSecretNotFound,
+			wantCode: codes.NotFound,
+		},
+		{
 			name:     "foreign key",
 			err:      &pgconn.PgError{Code: "23503", Message: "fk"},
 			wantCode: codes.FailedPrecondition,
@@ -208,5 +214,28 @@ func TestPageTokenInvalid(t *testing.T) {
 		t.Fatalf("expected error")
 	} else if !errors.Is(err, store.ErrInvalidPageToken) {
 		t.Fatalf("expected invalid page token error, got %v", err)
+	}
+}
+
+func TestParseRemoteSecretRef(t *testing.T) {
+	if _, err := parseRemoteSecretRef(nil); err == nil {
+		t.Fatalf("expected error for nil ref")
+	}
+	if _, err := parseRemoteSecretRef(&secretsv1.RemoteSecretRef{ValueProviderId: "bad", ValueReference: "ref"}); err == nil {
+		t.Fatalf("expected error for invalid provider id")
+	}
+	providerID := uuid.New()
+	if _, err := parseRemoteSecretRef(&secretsv1.RemoteSecretRef{ValueProviderId: providerID.String(), ValueReference: " "}); err == nil {
+		t.Fatalf("expected error for empty reference")
+	}
+	ref, err := parseRemoteSecretRef(&secretsv1.RemoteSecretRef{ValueProviderId: providerID.String(), ValueReference: "kv/path/key"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if ref.ProviderID != providerID {
+		t.Fatalf("unexpected provider id")
+	}
+	if ref.Reference != "kv/path/key" {
+		t.Fatalf("unexpected reference")
 	}
 }

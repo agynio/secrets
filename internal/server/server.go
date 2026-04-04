@@ -15,6 +15,7 @@ import (
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
+	"github.com/agynio/secrets/internal/crypto"
 	"github.com/agynio/secrets/internal/store"
 )
 
@@ -29,6 +30,11 @@ type SecretStore interface {
 	UpdateSecret(ctx context.Context, id uuid.UUID, input store.UpdateSecretInput) (store.Secret, error)
 	DeleteSecret(ctx context.Context, id uuid.UUID) error
 	ListSecrets(ctx context.Context, params store.ListSecretsParams) ([]store.Secret, string, error)
+	CreateImagePullSecret(ctx context.Context, input store.CreateImagePullSecretInput) (store.ImagePullSecret, error)
+	GetImagePullSecret(ctx context.Context, id uuid.UUID) (store.ImagePullSecret, error)
+	UpdateImagePullSecret(ctx context.Context, id uuid.UUID, input store.UpdateImagePullSecretInput) (store.ImagePullSecret, error)
+	DeleteImagePullSecret(ctx context.Context, id uuid.UUID) error
+	ListImagePullSecrets(ctx context.Context, params store.ListImagePullSecretsParams) ([]store.ImagePullSecret, string, error)
 }
 
 type VaultResolver interface {
@@ -37,12 +43,13 @@ type VaultResolver interface {
 
 type Server struct {
 	secretsv1.UnimplementedSecretsServiceServer
-	store SecretStore
-	vault VaultResolver
+	store         SecretStore
+	vault         VaultResolver
+	encryptionKey []byte
 }
 
-func New(store SecretStore, vaultClient VaultResolver) *Server {
-	return &Server{store: store, vault: vaultClient}
+func New(store SecretStore, vaultClient VaultResolver, encryptionKey []byte) *Server {
+	return &Server{store: store, vault: vaultClient, encryptionKey: encryptionKey}
 }
 
 func (s *Server) CreateSecretProvider(ctx context.Context, req *secretsv1.CreateSecretProviderRequest) (*secretsv1.CreateSecretProviderResponse, error) {
@@ -175,19 +182,38 @@ func (s *Server) CreateSecret(ctx context.Context, req *secretsv1.CreateSecretRe
 		return nil, status.Errorf(codes.InvalidArgument, "organization_id: %v", err)
 	}
 
-	providerID, err := parseUUID(req.GetSecretProviderId())
-	if err != nil {
-		return nil, status.Errorf(codes.InvalidArgument, "secret_provider_id: %v", err)
-	}
-	if req.GetRemoteName() == "" {
-		return nil, status.Error(codes.InvalidArgument, "remote_name must be provided")
+	value := req.GetValue()
+	var providerID *uuid.UUID
+	remoteName := ""
+	var encryptedValue []byte
+	if value != "" {
+		if req.GetSecretProviderId() != "" || req.GetRemoteName() != "" {
+			return nil, status.Error(codes.InvalidArgument, "value is mutually exclusive with secret_provider_id and remote_name")
+		}
+		var err error
+		encryptedValue, err = crypto.Encrypt(s.encryptionKey, []byte(value))
+		if err != nil {
+			return nil, status.Errorf(codes.Internal, "encrypt value: %v", err)
+		}
+	} else {
+		parsed, err := parseUUID(req.GetSecretProviderId())
+		if err != nil {
+			return nil, status.Errorf(codes.InvalidArgument, "secret_provider_id: %v", err)
+		}
+		trimmedRemoteName := strings.TrimSpace(req.GetRemoteName())
+		if trimmedRemoteName == "" {
+			return nil, status.Error(codes.InvalidArgument, "remote_name must be provided")
+		}
+		providerID = &parsed
+		remoteName = trimmedRemoteName
 	}
 	secret, err := s.store.CreateSecret(ctx, store.CreateSecretInput{
 		OrganizationID:   organizationID,
 		Title:            req.GetTitle(),
 		Description:      req.GetDescription(),
 		SecretProviderID: providerID,
-		RemoteName:       req.GetRemoteName(),
+		RemoteName:       remoteName,
+		EncryptedValue:   encryptedValue,
 	})
 	if err != nil {
 		return nil, toStatusError(err)
@@ -215,28 +241,53 @@ func (s *Server) UpdateSecret(ctx context.Context, req *secretsv1.UpdateSecretRe
 	}
 
 	var providerID *uuid.UUID
-	if req.SecretProviderId != nil {
+	var remoteName *string
+	var encryptedValue *[]byte
+	setProviderID := false
+	setEncryptedValue := false
+
+	if req.Value != nil {
+		if req.SecretProviderId != nil || req.RemoteName != nil {
+			return nil, status.Error(codes.InvalidArgument, "value is mutually exclusive with secret_provider_id and remote_name")
+		}
+		valueBytes, err := crypto.Encrypt(s.encryptionKey, []byte(req.GetValue()))
+		if err != nil {
+			return nil, status.Errorf(codes.Internal, "encrypt value: %v", err)
+		}
+		encryptedValue = &valueBytes
+		setEncryptedValue = true
+		setProviderID = true
+		remoteValue := ""
+		remoteName = &remoteValue
+	} else if req.SecretProviderId != nil || req.RemoteName != nil {
+		if req.SecretProviderId == nil || req.RemoteName == nil {
+			return nil, status.Error(codes.InvalidArgument, "secret_provider_id and remote_name must be provided together")
+		}
 		parsed, err := parseUUID(req.GetSecretProviderId())
 		if err != nil {
 			return nil, status.Errorf(codes.InvalidArgument, "secret_provider_id: %v", err)
 		}
-		providerID = &parsed
-	}
-
-	var remoteName *string
-	if req.RemoteName != nil {
-		if req.GetRemoteName() == "" {
+		trimmedRemoteName := strings.TrimSpace(req.GetRemoteName())
+		if trimmedRemoteName == "" {
 			return nil, status.Error(codes.InvalidArgument, "remote_name must be provided")
 		}
-		value := req.GetRemoteName()
+		providerID = &parsed
+		setProviderID = true
+		value := trimmedRemoteName
 		remoteName = &value
+		setEncryptedValue = true
+		var cleared []byte
+		encryptedValue = &cleared
 	}
 
 	secret, err := s.store.UpdateSecret(ctx, secretID, store.UpdateSecretInput{
-		Title:            req.Title,
-		Description:      req.Description,
-		SecretProviderID: providerID,
-		RemoteName:       remoteName,
+		Title:               req.Title,
+		Description:         req.Description,
+		SecretProviderID:    providerID,
+		SetSecretProviderID: setProviderID,
+		RemoteName:          remoteName,
+		EncryptedValue:      encryptedValue,
+		SetEncryptedValue:   setEncryptedValue,
 	})
 	if err != nil {
 		return nil, toStatusError(err)
@@ -298,7 +349,17 @@ func (s *Server) ResolveSecret(ctx context.Context, req *secretsv1.ResolveSecret
 	if err != nil {
 		return nil, toStatusError(err)
 	}
-	provider, err := s.store.GetSecretProvider(ctx, secret.SecretProviderID)
+	if len(secret.EncryptedValue) > 0 {
+		plaintext, err := crypto.Decrypt(s.encryptionKey, secret.EncryptedValue)
+		if err != nil {
+			return nil, status.Errorf(codes.Internal, "decrypt secret: %v", err)
+		}
+		return &secretsv1.ResolveSecretResponse{Value: string(plaintext)}, nil
+	}
+	if secret.SecretProviderID == nil {
+		return nil, status.Error(codes.FailedPrecondition, "secret has no provider")
+	}
+	provider, err := s.store.GetSecretProvider(ctx, *secret.SecretProviderID)
 	if err != nil {
 		return nil, toStatusError(err)
 	}
@@ -318,6 +379,228 @@ func (s *Server) ResolveSecret(ctx context.Context, req *secretsv1.ResolveSecret
 		return nil, status.Errorf(codes.Internal, "resolve vault secret: %v", err)
 	}
 	return &secretsv1.ResolveSecretResponse{Value: value}, nil
+}
+
+func (s *Server) CreateImagePullSecret(ctx context.Context, req *secretsv1.CreateImagePullSecretRequest) (*secretsv1.CreateImagePullSecretResponse, error) {
+	organizationID, err := parseUUID(req.GetOrganizationId())
+	if err != nil {
+		return nil, status.Errorf(codes.InvalidArgument, "organization_id: %v", err)
+	}
+
+	registry := strings.TrimSpace(req.GetRegistry())
+	if registry == "" {
+		return nil, status.Error(codes.InvalidArgument, "registry must be provided")
+	}
+	username := strings.TrimSpace(req.GetUsername())
+	if username == "" {
+		return nil, status.Error(codes.InvalidArgument, "username must be provided")
+	}
+
+	var encryptedValue []byte
+	var providerID *uuid.UUID
+	valueReference := ""
+
+	switch src := req.GetSource().(type) {
+	case *secretsv1.CreateImagePullSecretRequest_Value:
+		valueBytes, err := crypto.Encrypt(s.encryptionKey, []byte(src.Value))
+		if err != nil {
+			return nil, status.Errorf(codes.Internal, "encrypt value: %v", err)
+		}
+		encryptedValue = valueBytes
+	case *secretsv1.CreateImagePullSecretRequest_Remote:
+		ref, err := parseRemoteSecretRef(src.Remote)
+		if err != nil {
+			return nil, status.Errorf(codes.InvalidArgument, "remote: %v", err)
+		}
+		providerID = &ref.ProviderID
+		valueReference = ref.Reference
+	default:
+		return nil, status.Error(codes.InvalidArgument, "value or remote must be provided")
+	}
+
+	secret, err := s.store.CreateImagePullSecret(ctx, store.CreateImagePullSecretInput{
+		OrganizationID:  organizationID,
+		Description:     req.GetDescription(),
+		Registry:        registry,
+		Username:        username,
+		EncryptedValue:  encryptedValue,
+		ValueProviderID: providerID,
+		ValueReference:  valueReference,
+	})
+	if err != nil {
+		return nil, toStatusError(err)
+	}
+
+	return &secretsv1.CreateImagePullSecretResponse{ImagePullSecret: toProtoImagePullSecret(secret)}, nil
+}
+
+func (s *Server) GetImagePullSecret(ctx context.Context, req *secretsv1.GetImagePullSecretRequest) (*secretsv1.GetImagePullSecretResponse, error) {
+	secretID, err := parseUUID(req.GetId())
+	if err != nil {
+		return nil, status.Errorf(codes.InvalidArgument, "id: %v", err)
+	}
+	secret, err := s.store.GetImagePullSecret(ctx, secretID)
+	if err != nil {
+		return nil, toStatusError(err)
+	}
+	return &secretsv1.GetImagePullSecretResponse{ImagePullSecret: toProtoImagePullSecret(secret)}, nil
+}
+
+func (s *Server) UpdateImagePullSecret(ctx context.Context, req *secretsv1.UpdateImagePullSecretRequest) (*secretsv1.UpdateImagePullSecretResponse, error) {
+	secretID, err := parseUUID(req.GetId())
+	if err != nil {
+		return nil, status.Errorf(codes.InvalidArgument, "id: %v", err)
+	}
+
+	var registry *string
+	if req.Registry != nil {
+		trimmed := strings.TrimSpace(req.GetRegistry())
+		if trimmed == "" {
+			return nil, status.Error(codes.InvalidArgument, "registry must be provided")
+		}
+		registry = &trimmed
+	}
+	var username *string
+	if req.Username != nil {
+		trimmed := strings.TrimSpace(req.GetUsername())
+		if trimmed == "" {
+			return nil, status.Error(codes.InvalidArgument, "username must be provided")
+		}
+		username = &trimmed
+	}
+
+	var providerID *uuid.UUID
+	var valueReference *string
+	var encryptedValue *[]byte
+	setProviderID := false
+	setEncryptedValue := false
+
+	switch src := req.GetSource().(type) {
+	case *secretsv1.UpdateImagePullSecretRequest_Value:
+		valueBytes, err := crypto.Encrypt(s.encryptionKey, []byte(src.Value))
+		if err != nil {
+			return nil, status.Errorf(codes.Internal, "encrypt value: %v", err)
+		}
+		encryptedValue = &valueBytes
+		setEncryptedValue = true
+		setProviderID = true
+		clearedReference := ""
+		valueReference = &clearedReference
+	case *secretsv1.UpdateImagePullSecretRequest_Remote:
+		ref, err := parseRemoteSecretRef(src.Remote)
+		if err != nil {
+			return nil, status.Errorf(codes.InvalidArgument, "remote: %v", err)
+		}
+		providerID = &ref.ProviderID
+		setProviderID = true
+		valueReferenceValue := ref.Reference
+		valueReference = &valueReferenceValue
+		setEncryptedValue = true
+		var cleared []byte
+		encryptedValue = &cleared
+	}
+
+	secret, err := s.store.UpdateImagePullSecret(ctx, secretID, store.UpdateImagePullSecretInput{
+		Description:        req.Description,
+		Registry:           registry,
+		Username:           username,
+		ValueProviderID:    providerID,
+		SetValueProviderID: setProviderID,
+		ValueReference:     valueReference,
+		EncryptedValue:     encryptedValue,
+		SetEncryptedValue:  setEncryptedValue,
+	})
+	if err != nil {
+		return nil, toStatusError(err)
+	}
+	return &secretsv1.UpdateImagePullSecretResponse{ImagePullSecret: toProtoImagePullSecret(secret)}, nil
+}
+
+func (s *Server) DeleteImagePullSecret(ctx context.Context, req *secretsv1.DeleteImagePullSecretRequest) (*secretsv1.DeleteImagePullSecretResponse, error) {
+	secretID, err := parseUUID(req.GetId())
+	if err != nil {
+		return nil, status.Errorf(codes.InvalidArgument, "id: %v", err)
+	}
+	if err := s.store.DeleteImagePullSecret(ctx, secretID); err != nil {
+		return nil, toStatusError(err)
+	}
+	return &secretsv1.DeleteImagePullSecretResponse{}, nil
+}
+
+func (s *Server) ListImagePullSecrets(ctx context.Context, req *secretsv1.ListImagePullSecretsRequest) (*secretsv1.ListImagePullSecretsResponse, error) {
+	organizationID, err := parseUUID(req.GetOrganizationId())
+	if err != nil {
+		return nil, status.Errorf(codes.InvalidArgument, "organization_id: %v", err)
+	}
+
+	params := store.ListImagePullSecretsParams{
+		OrganizationID: organizationID,
+		PageSize:       req.GetPageSize(),
+		PageToken:      req.GetPageToken(),
+	}
+
+	secrets, nextToken, err := s.store.ListImagePullSecrets(ctx, params)
+	if err != nil {
+		return nil, toStatusError(err)
+	}
+
+	resp := &secretsv1.ListImagePullSecretsResponse{
+		ImagePullSecrets: make([]*secretsv1.ImagePullSecret, len(secrets)),
+		NextPageToken:    nextToken,
+	}
+	for i, secret := range secrets {
+		resp.ImagePullSecrets[i] = toProtoImagePullSecret(secret)
+	}
+	return resp, nil
+}
+
+func (s *Server) ResolveImagePullSecret(ctx context.Context, req *secretsv1.ResolveImagePullSecretRequest) (*secretsv1.ResolveImagePullSecretResponse, error) {
+	secretID, err := parseUUID(req.GetId())
+	if err != nil {
+		return nil, status.Errorf(codes.InvalidArgument, "id: %v", err)
+	}
+	secret, err := s.store.GetImagePullSecret(ctx, secretID)
+	if err != nil {
+		return nil, toStatusError(err)
+	}
+	if len(secret.EncryptedValue) > 0 {
+		plaintext, err := crypto.Decrypt(s.encryptionKey, secret.EncryptedValue)
+		if err != nil {
+			return nil, status.Errorf(codes.Internal, "decrypt secret: %v", err)
+		}
+		return &secretsv1.ResolveImagePullSecretResponse{
+			Registry: secret.Registry,
+			Username: secret.Username,
+			Password: string(plaintext),
+		}, nil
+	}
+	if secret.ValueProviderID == nil {
+		return nil, status.Error(codes.FailedPrecondition, "image pull secret has no provider")
+	}
+	provider, err := s.store.GetSecretProvider(ctx, *secret.ValueProviderID)
+	if err != nil {
+		return nil, toStatusError(err)
+	}
+	if provider.Type != store.ProviderTypeVault {
+		return nil, status.Errorf(codes.FailedPrecondition, "unsupported secret provider type: %s", provider.Type)
+	}
+	config, err := vaultConfigFromJSON(provider.Config)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "decode secret provider config: %v", err)
+	}
+	ref, err := parseVaultRemoteName(secret.ValueReference)
+	if err != nil {
+		return nil, status.Errorf(codes.InvalidArgument, "value_reference: %v", err)
+	}
+	value, err := s.vault.ReadKV2(ctx, config.Address, config.Token, ref.Mount, ref.Path, ref.Key)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "resolve vault secret: %v", err)
+	}
+	return &secretsv1.ResolveImagePullSecretResponse{
+		Registry: secret.Registry,
+		Username: secret.Username,
+		Password: value,
+	}, nil
 }
 
 type vaultConfig struct {
@@ -393,13 +676,35 @@ func toProtoSecretProvider(provider store.SecretProvider) (*secretsv1.SecretProv
 }
 
 func toProtoSecret(secret store.Secret) *secretsv1.Secret {
+	providerID := ""
+	if secret.SecretProviderID != nil {
+		providerID = secret.SecretProviderID.String()
+	}
 	return &secretsv1.Secret{
 		Meta:             toProtoEntityMeta(secret.ID, secret.CreatedAt, secret.UpdatedAt),
 		Title:            secret.Title,
 		Description:      secret.Description,
-		SecretProviderId: secret.SecretProviderID.String(),
+		SecretProviderId: providerID,
 		RemoteName:       secret.RemoteName,
 	}
+}
+
+func toProtoImagePullSecret(secret store.ImagePullSecret) *secretsv1.ImagePullSecret {
+	protoSecret := &secretsv1.ImagePullSecret{
+		Meta:        toProtoEntityMeta(secret.ID, secret.CreatedAt, secret.UpdatedAt),
+		Description: secret.Description,
+		Registry:    secret.Registry,
+		Username:    secret.Username,
+	}
+	if secret.ValueProviderID != nil {
+		protoSecret.Source = &secretsv1.ImagePullSecret_Remote{
+			Remote: &secretsv1.RemoteSecretRef{
+				ValueProviderId: secret.ValueProviderID.String(),
+				ValueReference:  secret.ValueReference,
+			},
+		}
+	}
+	return protoSecret
 }
 
 func toProtoEntityMeta(id uuid.UUID, createdAt, updatedAt time.Time) *secretsv1.EntityMeta {
@@ -450,6 +755,26 @@ func providerTypeToProto(value store.ProviderType) (secretsv1.SecretProviderType
 	}
 }
 
+type remoteSecretRef struct {
+	ProviderID uuid.UUID
+	Reference  string
+}
+
+func parseRemoteSecretRef(ref *secretsv1.RemoteSecretRef) (remoteSecretRef, error) {
+	if ref == nil {
+		return remoteSecretRef{}, fmt.Errorf("reference must be provided")
+	}
+	providerID, err := parseUUID(ref.GetValueProviderId())
+	if err != nil {
+		return remoteSecretRef{}, fmt.Errorf("value_provider_id: %w", err)
+	}
+	reference := strings.TrimSpace(ref.GetValueReference())
+	if reference == "" {
+		return remoteSecretRef{}, fmt.Errorf("value_reference must be provided")
+	}
+	return remoteSecretRef{ProviderID: providerID, Reference: reference}, nil
+}
+
 type vaultRemoteRef struct {
 	Mount string
 	Path  string
@@ -489,7 +814,7 @@ func toStatusError(err error) error {
 		return status.Error(codes.FailedPrecondition, pgErr.Message)
 	}
 	switch {
-	case errors.Is(err, store.ErrSecretProviderNotFound), errors.Is(err, store.ErrSecretNotFound):
+	case errors.Is(err, store.ErrSecretProviderNotFound), errors.Is(err, store.ErrSecretNotFound), errors.Is(err, store.ErrImagePullSecretNotFound):
 		return status.Error(codes.NotFound, err.Error())
 	case errors.Is(err, store.ErrInvalidPageToken):
 		return status.Error(codes.InvalidArgument, err.Error())
