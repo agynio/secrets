@@ -30,3 +30,11 @@
 {{- default "default" .Values.serviceAccount.name -}}
 {{- end -}}
 {{- end -}}
+
+{{- define "secrets.encryptionKeyEnv" -}}
+{{- $encKeyFile := trimAll " \n\t" (default "" .Values.secrets.encryptionKeyFile) -}}
+{{- if $encKeyFile }}
+- name: ENCRYPTION_KEY_FILE
+  value: {{ $encKeyFile | quote }}
+{{- end }}
+{{- end -}}

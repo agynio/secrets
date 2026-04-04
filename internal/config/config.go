@@ -8,6 +8,7 @@ import (
 type Config struct {
 	GRPCAddress string
 	DatabaseURL string
+	EncryptionKeyFile string
 }
 
 func FromEnv() (Config, error) {
@@ -19,6 +20,10 @@ func FromEnv() (Config, error) {
 	cfg.DatabaseURL = os.Getenv("DATABASE_URL")
 	if cfg.DatabaseURL == "" {
 		return Config{}, fmt.Errorf("DATABASE_URL must be set")
+	}
+	cfg.EncryptionKeyFile = os.Getenv("ENCRYPTION_KEY_FILE")
+	if cfg.EncryptionKeyFile == "" {
+		return Config{}, fmt.Errorf("ENCRYPTION_KEY_FILE must be set")
 	}
 	return cfg, nil
 }
