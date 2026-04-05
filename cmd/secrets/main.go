@@ -16,6 +16,7 @@ import (
 	"google.golang.org/grpc"
 
 	"github.com/agynio/secrets/internal/config"
+	"github.com/agynio/secrets/internal/crypto"
 	"github.com/agynio/secrets/internal/db"
 	"github.com/agynio/secrets/internal/server"
 	"github.com/agynio/secrets/internal/store"
@@ -37,6 +38,11 @@ func run() error {
 		return err
 	}
 
+	encryptionKey, err := crypto.LoadKey(cfg.EncryptionKeyFile)
+	if err != nil {
+		return fmt.Errorf("load encryption key: %w", err)
+	}
+
 	poolCfg, err := pgxpool.ParseConfig(cfg.DatabaseURL)
 	if err != nil {
 		return fmt.Errorf("parse database url: %w", err)
@@ -52,7 +58,7 @@ func run() error {
 	}
 
 	grpcServer := grpc.NewServer()
-	secretsv1.RegisterSecretsServiceServer(grpcServer, server.New(store.NewStore(pool), vault.NewClient(http.DefaultClient)))
+	secretsv1.RegisterSecretsServiceServer(grpcServer, server.New(store.NewStore(pool), vault.NewClient(http.DefaultClient), encryptionKey))
 
 	lis, err := net.Listen("tcp", cfg.GRPCAddress)
 	if err != nil {
