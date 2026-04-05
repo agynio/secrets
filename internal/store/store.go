@@ -378,14 +378,9 @@ func (s *Store) ListImagePullSecrets(ctx context.Context, params ListImagePullSe
 		return nil, "", err
 	}
 
-	conditions := []string{"organization_id = $1"}
-	args := []any{params.OrganizationID}
-
-	stmt := `SELECT id, organization_id, description, registry, username, encrypted_value, value_provider_id, value_reference, created_at, updated_at FROM image_pull_secrets`
-	stmt += " WHERE " + strings.Join(conditions, " AND ")
-	limitStart := len(args)
-	args = append(args, page.Limit+1, page.Offset)
-	stmt += fmt.Sprintf(" ORDER BY created_at DESC, id DESC LIMIT $%d OFFSET $%d", limitStart+1, limitStart+2)
+	stmt := "SELECT id, organization_id, description, registry, username, encrypted_value, value_provider_id, value_reference, created_at, updated_at FROM image_pull_secrets"
+	stmt += " WHERE organization_id = $1 ORDER BY created_at DESC, id DESC LIMIT $2 OFFSET $3"
+	args := []any{params.OrganizationID, page.Limit + 1, page.Offset}
 
 	rows, err := s.pool.Query(ctx, stmt, args...)
 	if err != nil {

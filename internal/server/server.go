@@ -359,24 +359,9 @@ func (s *Server) ResolveSecret(ctx context.Context, req *secretsv1.ResolveSecret
 	if secret.SecretProviderID == nil {
 		return nil, status.Error(codes.FailedPrecondition, "secret has no provider")
 	}
-	provider, err := s.store.GetSecretProvider(ctx, *secret.SecretProviderID)
+	value, err := s.resolveVaultValue(ctx, *secret.SecretProviderID, secret.RemoteName)
 	if err != nil {
-		return nil, toStatusError(err)
-	}
-	if provider.Type != store.ProviderTypeVault {
-		return nil, status.Errorf(codes.FailedPrecondition, "unsupported secret provider type: %s", provider.Type)
-	}
-	config, err := vaultConfigFromJSON(provider.Config)
-	if err != nil {
-		return nil, status.Errorf(codes.Internal, "decode secret provider config: %v", err)
-	}
-	ref, err := parseVaultRemoteName(secret.RemoteName)
-	if err != nil {
-		return nil, status.Errorf(codes.InvalidArgument, "remote_name: %v", err)
-	}
-	value, err := s.vault.ReadKV2(ctx, config.Address, config.Token, ref.Mount, ref.Path, ref.Key)
-	if err != nil {
-		return nil, status.Errorf(codes.Internal, "resolve vault secret: %v", err)
+		return nil, mapVaultResolveError(err, "remote_name")
 	}
 	return &secretsv1.ResolveSecretResponse{Value: value}, nil
 }
@@ -577,30 +562,61 @@ func (s *Server) ResolveImagePullSecret(ctx context.Context, req *secretsv1.Reso
 	if secret.ValueProviderID == nil {
 		return nil, status.Error(codes.FailedPrecondition, "image pull secret has no provider")
 	}
-	provider, err := s.store.GetSecretProvider(ctx, *secret.ValueProviderID)
+	value, err := s.resolveVaultValue(ctx, *secret.ValueProviderID, secret.ValueReference)
 	if err != nil {
-		return nil, toStatusError(err)
-	}
-	if provider.Type != store.ProviderTypeVault {
-		return nil, status.Errorf(codes.FailedPrecondition, "unsupported secret provider type: %s", provider.Type)
-	}
-	config, err := vaultConfigFromJSON(provider.Config)
-	if err != nil {
-		return nil, status.Errorf(codes.Internal, "decode secret provider config: %v", err)
-	}
-	ref, err := parseVaultRemoteName(secret.ValueReference)
-	if err != nil {
-		return nil, status.Errorf(codes.InvalidArgument, "value_reference: %v", err)
-	}
-	value, err := s.vault.ReadKV2(ctx, config.Address, config.Token, ref.Mount, ref.Path, ref.Key)
-	if err != nil {
-		return nil, status.Errorf(codes.Internal, "resolve vault secret: %v", err)
+		return nil, mapVaultResolveError(err, "value_reference")
 	}
 	return &secretsv1.ResolveImagePullSecretResponse{
 		Registry: secret.Registry,
 		Username: secret.Username,
 		Password: value,
 	}, nil
+}
+
+type vaultRemoteNameError struct {
+	err error
+}
+
+func (e vaultRemoteNameError) Error() string {
+	return e.err.Error()
+}
+
+func (e vaultRemoteNameError) Unwrap() error {
+	return e.err
+}
+
+func (s *Server) resolveVaultValue(ctx context.Context, providerID uuid.UUID, remoteName string) (string, error) {
+	provider, err := s.store.GetSecretProvider(ctx, providerID)
+	if err != nil {
+		return "", err
+	}
+	if provider.Type != store.ProviderTypeVault {
+		return "", status.Errorf(codes.FailedPrecondition, "unsupported secret provider type: %s", provider.Type)
+	}
+	config, err := vaultConfigFromJSON(provider.Config)
+	if err != nil {
+		return "", status.Errorf(codes.Internal, "decode secret provider config: %v", err)
+	}
+	ref, err := parseVaultRemoteName(remoteName)
+	if err != nil {
+		return "", vaultRemoteNameError{err: err}
+	}
+	value, err := s.vault.ReadKV2(ctx, config.Address, config.Token, ref.Mount, ref.Path, ref.Key)
+	if err != nil {
+		return "", status.Errorf(codes.Internal, "resolve vault secret: %v", err)
+	}
+	return value, nil
+}
+
+func mapVaultResolveError(err error, field string) error {
+	var remoteErr vaultRemoteNameError
+	if errors.As(err, &remoteErr) {
+		return status.Errorf(codes.InvalidArgument, "%s: %v", field, remoteErr.err)
+	}
+	if st, ok := status.FromError(err); ok {
+		return st.Err()
+	}
+	return toStatusError(err)
 }
 
 type vaultConfig struct {
