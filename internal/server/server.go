@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -45,11 +46,17 @@ type Server struct {
 	secretsv1.UnimplementedSecretsServiceServer
 	store         SecretStore
 	vault         VaultResolver
+	egressRules   EgressRulesClient
 	encryptionKey []byte
 }
 
 func New(store SecretStore, vaultClient VaultResolver, encryptionKey []byte) *Server {
 	return &Server{store: store, vault: vaultClient, encryptionKey: encryptionKey}
+}
+
+func (s *Server) WithEgressRulesClient(client EgressRulesClient) *Server {
+	s.egressRules = client
+	return s
 }
 
 func (s *Server) CreateSecretProvider(ctx context.Context, req *secretsv1.CreateSecretProviderRequest) (*secretsv1.CreateSecretProviderResponse, error) {
@@ -300,10 +307,33 @@ func (s *Server) DeleteSecret(ctx context.Context, req *secretsv1.DeleteSecretRe
 	if err != nil {
 		return nil, status.Errorf(codes.InvalidArgument, "id: %v", err)
 	}
+	if err := s.ensureSecretNotReferencedByEgressRules(ctx, secretID); err != nil {
+		return nil, err
+	}
 	if err := s.store.DeleteSecret(ctx, secretID); err != nil {
 		return nil, toStatusError(err)
 	}
 	return &secretsv1.DeleteSecretResponse{}, nil
+}
+
+func (s *Server) ensureSecretNotReferencedByEgressRules(ctx context.Context, secretID uuid.UUID) error {
+	if s.egressRules == nil {
+		return status.Error(codes.FailedPrecondition, "cannot verify egress rule references for secret deletion")
+	}
+	references, err := s.egressRules.CountRulesReferencingSecret(ctx, secretID.String())
+	if err != nil {
+		return status.Errorf(codes.FailedPrecondition, "cannot verify egress rule references for secret deletion: %v", err)
+	}
+	if references.Count == 0 {
+		return nil
+	}
+	sort.Strings(references.EgressRuleIDs)
+	return status.Errorf(
+		codes.FailedPrecondition,
+		"secret is referenced by %d egress rule(s): %s",
+		references.Count,
+		strings.Join(references.EgressRuleIDs, ", "),
+	)
 }
 
 func (s *Server) ListSecrets(ctx context.Context, req *secretsv1.ListSecretsRequest) (*secretsv1.ListSecretsResponse, error) {
@@ -364,6 +394,24 @@ func (s *Server) ResolveSecret(ctx context.Context, req *secretsv1.ResolveSecret
 		return nil, mapVaultResolveError(err, "remote_name")
 	}
 	return &secretsv1.ResolveSecretResponse{Value: value}, nil
+}
+
+func (s *Server) ResolveSecretExists(ctx context.Context, req *secretsv1.ResolveSecretExistsRequest) (*secretsv1.ResolveSecretExistsResponse, error) {
+	secretID, err := parseUUID(req.GetId())
+	if err != nil {
+		return nil, status.Errorf(codes.InvalidArgument, "id: %v", err)
+	}
+	secret, err := s.store.GetSecret(ctx, secretID)
+	if err != nil {
+		if errors.Is(err, store.ErrSecretNotFound) {
+			return &secretsv1.ResolveSecretExistsResponse{Exists: false}, nil
+		}
+		return nil, toStatusError(err)
+	}
+	return &secretsv1.ResolveSecretExistsResponse{
+		Exists:         true,
+		OrganizationId: secret.OrganizationID.String(),
+	}, nil
 }
 
 func (s *Server) CreateImagePullSecret(ctx context.Context, req *secretsv1.CreateImagePullSecretRequest) (*secretsv1.CreateImagePullSecretResponse, error) {

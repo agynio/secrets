@@ -58,7 +58,16 @@ func run() error {
 	}
 
 	grpcServer := grpc.NewServer()
-	secretsv1.RegisterSecretsServiceServer(grpcServer, server.New(store.NewStore(pool), vault.NewClient(http.DefaultClient), encryptionKey))
+	secretsServer := server.New(store.NewStore(pool), vault.NewClient(http.DefaultClient), encryptionKey)
+	egressRulesClient, egressRulesConn, err := server.DialEgressRulesClient(ctx, cfg.EgressRulesGRPCTarget)
+	if err != nil {
+		return err
+	}
+	if egressRulesConn != nil {
+		defer egressRulesConn.Close()
+	}
+	secretsServer.WithEgressRulesClient(egressRulesClient)
+	secretsv1.RegisterSecretsServiceServer(grpcServer, secretsServer)
 
 	lis, err := net.Listen("tcp", cfg.GRPCAddress)
 	if err != nil {

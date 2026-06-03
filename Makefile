@@ -6,6 +6,7 @@ all: build
 
 proto:
 	buf generate buf.build/agynio/api --path agynio/api/secrets/v1
+	buf generate buf.build/agynio/api --path agynio/api/egress/v1
 
 build:
 	GOFLAGS=-mod=mod go build ./...

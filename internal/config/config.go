@@ -6,9 +6,10 @@ import (
 )
 
 type Config struct {
-	GRPCAddress       string
-	DatabaseURL       string
-	EncryptionKeyFile string
+	GRPCAddress           string
+	DatabaseURL           string
+	EncryptionKeyFile     string
+	EgressRulesGRPCTarget string
 }
 
 func FromEnv() (Config, error) {
@@ -25,5 +26,6 @@ func FromEnv() (Config, error) {
 	if cfg.EncryptionKeyFile == "" {
 		return Config{}, fmt.Errorf("ENCRYPTION_KEY_FILE must be set")
 	}
+	cfg.EgressRulesGRPCTarget = os.Getenv("EGRESS_RULES_GRPC_TARGET")
 	return cfg, nil
 }

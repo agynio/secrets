@@ -10,6 +10,7 @@ Proto stubs are generated via Buf and are gitignored under `gen/go`.
 
 ```bash
 buf generate buf.build/agynio/api --path agynio/api/secrets/v1
+buf generate buf.build/agynio/api --path agynio/api/egress/v1
 go build ./...
 ```
 
@@ -30,6 +31,8 @@ go run ./cmd/secrets
 | --- | --- | --- | --- |
 | `DATABASE_URL` | Yes | - | PostgreSQL connection string. |
 | `GRPC_ADDRESS` | No | `:50051` | Address for the gRPC server to listen on. |
+| `ENCRYPTION_KEY_FILE` | Yes | - | Path to the encryption key file used for local secret values. |
+| `EGRESS_RULES_GRPC_TARGET` | No | - | EgressRules gRPC target used to fail-closed on `DeleteSecret` when egress rules reference a secret. |
 
 ## Repository Layout
 

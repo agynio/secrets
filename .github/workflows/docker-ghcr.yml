@@ -25,7 +25,9 @@ jobs:
           version: 1.66.0
 
       - name: Generate protobuf stubs
-        run: buf generate buf.build/agynio/api --path agynio/api/secrets/v1
+        run: |
+          buf generate buf.build/agynio/api --path agynio/api/secrets/v1
+          buf generate buf.build/agynio/api --path agynio/api/egress/v1
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -86,7 +88,9 @@ jobs:
           version: 1.66.0
 
       - name: Generate protobuf stubs
-        run: buf generate buf.build/agynio/api --path agynio/api/secrets/v1
+        run: |
+          buf generate buf.build/agynio/api --path agynio/api/secrets/v1
+          buf generate buf.build/agynio/api --path agynio/api/egress/v1
 
       - name: Build and push image
         uses: docker/build-push-action@v6
