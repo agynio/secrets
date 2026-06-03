@@ -1,7 +1,9 @@
 package server
 
 import (
+	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	secretsv1 "github.com/agynio/secrets/gen/go/agynio/api/secrets/v1"
@@ -237,5 +239,187 @@ func TestParseRemoteSecretRef(t *testing.T) {
 	}
 	if ref.Reference != "kv/path/key" {
 		t.Fatalf("unexpected reference")
+	}
+}
+
+type fakeSecretStore struct {
+	getSecret       store.Secret
+	getSecretErr    error
+	deletedSecretID uuid.UUID
+}
+
+func (f fakeSecretStore) CreateSecretProvider(context.Context, store.CreateSecretProviderInput) (store.SecretProvider, error) {
+	panic("unexpected CreateSecretProvider")
+}
+
+func (f fakeSecretStore) GetSecretProvider(context.Context, uuid.UUID) (store.SecretProvider, error) {
+	panic("unexpected GetSecretProvider")
+}
+
+func (f fakeSecretStore) UpdateSecretProvider(context.Context, uuid.UUID, store.UpdateSecretProviderInput) (store.SecretProvider, error) {
+	panic("unexpected UpdateSecretProvider")
+}
+
+func (f fakeSecretStore) DeleteSecretProvider(context.Context, uuid.UUID) error {
+	panic("unexpected DeleteSecretProvider")
+}
+
+func (f fakeSecretStore) ListSecretProviders(context.Context, store.ListSecretProvidersParams) ([]store.SecretProvider, string, error) {
+	panic("unexpected ListSecretProviders")
+}
+
+func (f fakeSecretStore) CreateSecret(context.Context, store.CreateSecretInput) (store.Secret, error) {
+	panic("unexpected CreateSecret")
+}
+
+func (f fakeSecretStore) GetSecret(context.Context, uuid.UUID) (store.Secret, error) {
+	if f.getSecretErr != nil {
+		return store.Secret{}, f.getSecretErr
+	}
+	return f.getSecret, nil
+}
+
+func (f fakeSecretStore) UpdateSecret(context.Context, uuid.UUID, store.UpdateSecretInput) (store.Secret, error) {
+	panic("unexpected UpdateSecret")
+}
+
+func (f *fakeSecretStore) DeleteSecret(_ context.Context, id uuid.UUID) error {
+	f.deletedSecretID = id
+	return nil
+}
+
+func (f fakeSecretStore) ListSecrets(context.Context, store.ListSecretsParams) ([]store.Secret, string, error) {
+	panic("unexpected ListSecrets")
+}
+
+func (f fakeSecretStore) CreateImagePullSecret(context.Context, store.CreateImagePullSecretInput) (store.ImagePullSecret, error) {
+	panic("unexpected CreateImagePullSecret")
+}
+
+func (f fakeSecretStore) GetImagePullSecret(context.Context, uuid.UUID) (store.ImagePullSecret, error) {
+	panic("unexpected GetImagePullSecret")
+}
+
+func (f fakeSecretStore) UpdateImagePullSecret(context.Context, uuid.UUID, store.UpdateImagePullSecretInput) (store.ImagePullSecret, error) {
+	panic("unexpected UpdateImagePullSecret")
+}
+
+func (f fakeSecretStore) DeleteImagePullSecret(context.Context, uuid.UUID) error {
+	panic("unexpected DeleteImagePullSecret")
+}
+
+func (f fakeSecretStore) ListImagePullSecrets(context.Context, store.ListImagePullSecretsParams) ([]store.ImagePullSecret, string, error) {
+	panic("unexpected ListImagePullSecrets")
+}
+
+type fakeEgressRulesClient struct {
+	references EgressSecretReferences
+	err        error
+	secretID   string
+	called     bool
+}
+
+func (f *fakeEgressRulesClient) CountRulesReferencingSecret(_ context.Context, secretID string) (EgressSecretReferences, error) {
+	f.called = true
+	f.secretID = secretID
+	if f.err != nil {
+		return EgressSecretReferences{}, f.err
+	}
+	return f.references, nil
+}
+
+func TestResolveSecretExists(t *testing.T) {
+	secretID := uuid.New()
+	organizationID := uuid.New()
+	secret := store.Secret{ID: secretID, OrganizationID: organizationID}
+
+	resp, err := (&Server{store: &fakeSecretStore{getSecret: secret}}).ResolveSecretExists(context.Background(), &secretsv1.ResolveSecretExistsRequest{Id: secretID.String()})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !resp.GetExists() {
+		t.Fatalf("expected secret to exist")
+	}
+	if resp.GetOrganizationId() != organizationID.String() {
+		t.Fatalf("expected organization_id %q, got %q", organizationID.String(), resp.GetOrganizationId())
+	}
+
+	resp, err = (&Server{store: &fakeSecretStore{getSecretErr: store.ErrSecretNotFound}}).ResolveSecretExists(context.Background(), &secretsv1.ResolveSecretExistsRequest{Id: secretID.String()})
+	if err != nil {
+		t.Fatalf("unexpected missing-secret error: %v", err)
+	}
+	if resp.GetExists() {
+		t.Fatalf("expected missing secret response")
+	}
+	if resp.GetOrganizationId() != "" {
+		t.Fatalf("expected empty organization_id, got %q", resp.GetOrganizationId())
+	}
+}
+
+func TestDeleteSecretEgressReferenceCheck(t *testing.T) {
+	secretID := uuid.New()
+
+	t.Run("allows unreferenced delete", func(t *testing.T) {
+		egressClient := &fakeEgressRulesClient{}
+		store := &fakeSecretStore{}
+		_, err := (&Server{store: store, egressRules: egressClient}).DeleteSecret(context.Background(), &secretsv1.DeleteSecretRequest{Id: secretID.String()})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !egressClient.called {
+			t.Fatalf("expected egress reference check")
+		}
+		if egressClient.secretID != secretID.String() {
+			t.Fatalf("expected checked secret id %q, got %q", secretID.String(), egressClient.secretID)
+		}
+		if store.deletedSecretID != secretID {
+			t.Fatalf("expected deleted secret id %q, got %q", secretID, store.deletedSecretID)
+		}
+	})
+
+	t.Run("rejects referenced delete", func(t *testing.T) {
+		egressClient := &fakeEgressRulesClient{references: EgressSecretReferences{Count: 2, EgressRuleIDs: []string{"rule-b", "rule-a"}}}
+		store := &fakeSecretStore{}
+		_, err := (&Server{store: store, egressRules: egressClient}).DeleteSecret(context.Background(), &secretsv1.DeleteSecretRequest{Id: secretID.String()})
+		assertStatusCode(t, err, codes.FailedPrecondition)
+		if store.deletedSecretID != uuid.Nil {
+			t.Fatalf("secret should not be deleted")
+		}
+		if !strings.Contains(err.Error(), "rule-a, rule-b") {
+			t.Fatalf("expected referenced rule ids in error, got %v", err)
+		}
+	})
+
+	t.Run("fails closed without client", func(t *testing.T) {
+		store := &fakeSecretStore{}
+		_, err := (&Server{store: store}).DeleteSecret(context.Background(), &secretsv1.DeleteSecretRequest{Id: secretID.String()})
+		assertStatusCode(t, err, codes.FailedPrecondition)
+		if store.deletedSecretID != uuid.Nil {
+			t.Fatalf("secret should not be deleted")
+		}
+	})
+
+	t.Run("fails closed on check error", func(t *testing.T) {
+		egressClient := &fakeEgressRulesClient{err: errors.New("unavailable")}
+		store := &fakeSecretStore{}
+		_, err := (&Server{store: store, egressRules: egressClient}).DeleteSecret(context.Background(), &secretsv1.DeleteSecretRequest{Id: secretID.String()})
+		assertStatusCode(t, err, codes.FailedPrecondition)
+		if store.deletedSecretID != uuid.Nil {
+			t.Fatalf("secret should not be deleted")
+		}
+	})
+}
+
+func assertStatusCode(t *testing.T, err error, want codes.Code) {
+	t.Helper()
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+	st, ok := status.FromError(err)
+	if !ok {
+		t.Fatalf("expected status error, got %v", err)
+	}
+	if st.Code() != want {
+		t.Fatalf("expected code %v, got %v", want, st.Code())
 	}
 }
