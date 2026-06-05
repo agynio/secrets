@@ -68,7 +68,12 @@ jobs:
           push: true
           tags: |
             ${{ env.IMAGE_NAME }}:${{ env.RELEASE_VERSION }}
+            ${{ env.IMAGE_NAME }}:${{ env.CHART_VERSION }}
             ${{ env.IMAGE_NAME }}:latest
+
+      - name: Verify matching image tag
+        run: |
+          docker buildx imagetools inspect "${IMAGE_NAME}:${CHART_VERSION}" >/dev/null
 
   charts:
     name: Package and publish Helm chart
@@ -98,6 +103,10 @@ jobs:
 
       - name: Lint chart
         run: helm lint ${{ env.CHART_PATH }} --set database.url=dummy
+
+      - name: Verify matching image tag
+        run: |
+          docker buildx imagetools inspect "${IMAGE_NAME}:${CHART_VERSION}" >/dev/null
 
       - name: Package chart
         run: |
