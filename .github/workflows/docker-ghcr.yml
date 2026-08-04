@@ -26,10 +26,7 @@ jobs:
 
       - name: Generate protobuf stubs
         run: |
-          # secrets/v1 is vendored under proto/ until the ImagePullSecret removal
-          # lands in buf.build/agynio/api; see proto/buf.yaml.
-          buf generate proto --template buf.gen.yaml
-          buf generate buf.build/agynio/api --path agynio/api/egress/v1
+          buf generate buf.build/agynio/api --path agynio/api/egress/v1 --path agynio/api/secrets/v1
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -91,10 +88,7 @@ jobs:
 
       - name: Generate protobuf stubs
         run: |
-          # secrets/v1 is vendored under proto/ until the ImagePullSecret removal
-          # lands in buf.build/agynio/api; see proto/buf.yaml.
-          buf generate proto --template buf.gen.yaml
-          buf generate buf.build/agynio/api --path agynio/api/egress/v1
+          buf generate buf.build/agynio/api --path agynio/api/egress/v1 --path agynio/api/secrets/v1
 
       - name: Build and push image
         uses: docker/build-push-action@v6
