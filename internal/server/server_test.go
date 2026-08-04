@@ -150,11 +150,6 @@ func TestToStatusError(t *testing.T) {
 			wantCode: codes.NotFound,
 		},
 		{
-			name:     "image pull secret not found",
-			err:      store.ErrImagePullSecretNotFound,
-			wantCode: codes.NotFound,
-		},
-		{
 			name:     "foreign key",
 			err:      &pgconn.PgError{Code: "23503", Message: "fk"},
 			wantCode: codes.FailedPrecondition,
@@ -290,26 +285,6 @@ func (f *fakeSecretStore) DeleteSecret(_ context.Context, id uuid.UUID) error {
 
 func (f fakeSecretStore) ListSecrets(context.Context, store.ListSecretsParams) ([]store.Secret, string, error) {
 	panic("unexpected ListSecrets")
-}
-
-func (f fakeSecretStore) CreateImagePullSecret(context.Context, store.CreateImagePullSecretInput) (store.ImagePullSecret, error) {
-	panic("unexpected CreateImagePullSecret")
-}
-
-func (f fakeSecretStore) GetImagePullSecret(context.Context, uuid.UUID) (store.ImagePullSecret, error) {
-	panic("unexpected GetImagePullSecret")
-}
-
-func (f fakeSecretStore) UpdateImagePullSecret(context.Context, uuid.UUID, store.UpdateImagePullSecretInput) (store.ImagePullSecret, error) {
-	panic("unexpected UpdateImagePullSecret")
-}
-
-func (f fakeSecretStore) DeleteImagePullSecret(context.Context, uuid.UUID) error {
-	panic("unexpected DeleteImagePullSecret")
-}
-
-func (f fakeSecretStore) ListImagePullSecrets(context.Context, store.ListImagePullSecretsParams) ([]store.ImagePullSecret, string, error) {
-	panic("unexpected ListImagePullSecrets")
 }
 
 type fakeEgressRulesClient struct {

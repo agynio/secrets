@@ -5,7 +5,9 @@ SHELL := /bin/bash
 all: build
 
 proto:
-	buf generate buf.build/agynio/api --path agynio/api/secrets/v1
+	# secrets/v1 is vendored under proto/ until the ImagePullSecret removal
+	# lands in buf.build/agynio/api; see proto/buf.yaml.
+	buf generate proto --template buf.gen.yaml
 	buf generate buf.build/agynio/api --path agynio/api/egress/v1
 
 build:

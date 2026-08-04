@@ -21,10 +21,9 @@ const (
 )
 
 var (
-	ErrSecretProviderNotFound  = errors.New("secret provider not found")
-	ErrSecretNotFound          = errors.New("secret not found")
-	ErrImagePullSecretNotFound = errors.New("image pull secret not found")
-	ErrInvalidPageToken        = errors.New("invalid page token")
+	ErrSecretProviderNotFound = errors.New("secret provider not found")
+	ErrSecretNotFound         = errors.New("secret not found")
+	ErrInvalidPageToken       = errors.New("invalid page token")
 )
 
 type ProviderType string
@@ -54,19 +53,6 @@ type Secret struct {
 	EncryptedValue   []byte
 	CreatedAt        time.Time
 	UpdatedAt        time.Time
-}
-
-type ImagePullSecret struct {
-	ID              uuid.UUID
-	OrganizationID  uuid.UUID
-	Description     string
-	Registry        string
-	Username        string
-	EncryptedValue  []byte
-	ValueProviderID *uuid.UUID
-	ValueReference  string
-	CreatedAt       time.Time
-	UpdatedAt       time.Time
 }
 
 type Store struct {
@@ -203,33 +189,6 @@ type ListSecretsParams struct {
 	SecretProviderID *uuid.UUID
 }
 
-type CreateImagePullSecretInput struct {
-	OrganizationID  uuid.UUID
-	Description     string
-	Registry        string
-	Username        string
-	EncryptedValue  []byte
-	ValueProviderID *uuid.UUID
-	ValueReference  string
-}
-
-type UpdateImagePullSecretInput struct {
-	Description        *string
-	Registry           *string
-	Username           *string
-	ValueProviderID    *uuid.UUID
-	SetValueProviderID bool
-	ValueReference     *string
-	EncryptedValue     *[]byte
-	SetEncryptedValue  bool
-}
-
-type ListImagePullSecretsParams struct {
-	OrganizationID uuid.UUID
-	PageSize       int32
-	PageToken      string
-}
-
 func (s *Store) CreateSecret(ctx context.Context, input CreateSecretInput) (Secret, error) {
 	row := s.pool.QueryRow(ctx, `
 		INSERT INTO secrets (organization_id, title, description, secret_provider_id, remote_name, encrypted_value)
@@ -319,95 +278,6 @@ func (s *Store) ListSecrets(ctx context.Context, params ListSecretsParams) ([]Se
 	return secrets, nextToken, nil
 }
 
-func (s *Store) CreateImagePullSecret(ctx context.Context, input CreateImagePullSecretInput) (ImagePullSecret, error) {
-	row := s.pool.QueryRow(ctx, `
-		INSERT INTO image_pull_secrets (
-			organization_id,
-			description,
-			registry,
-			username,
-			encrypted_value,
-			value_provider_id,
-			value_reference
-		)
-		VALUES ($1, $2, $3, $4, $5, $6, $7)
-		RETURNING id, organization_id, description, registry, username, encrypted_value, value_provider_id, value_reference, created_at, updated_at
-	`, input.OrganizationID, input.Description, input.Registry, input.Username, input.EncryptedValue, input.ValueProviderID, input.ValueReference)
-	return scanImagePullSecret(row)
-}
-
-func (s *Store) GetImagePullSecret(ctx context.Context, id uuid.UUID) (ImagePullSecret, error) {
-	row := s.pool.QueryRow(ctx, `
-		SELECT id, organization_id, description, registry, username, encrypted_value, value_provider_id, value_reference, created_at, updated_at
-		FROM image_pull_secrets
-		WHERE id = $1
-	`, id)
-	return scanImagePullSecret(row)
-}
-
-func (s *Store) UpdateImagePullSecret(ctx context.Context, id uuid.UUID, input UpdateImagePullSecretInput) (ImagePullSecret, error) {
-	row := s.pool.QueryRow(ctx, `
-		UPDATE image_pull_secrets
-		SET description = COALESCE($2, description),
-			registry = COALESCE($3, registry),
-			username = COALESCE($4, username),
-			value_provider_id = CASE WHEN $5 THEN $6 ELSE value_provider_id END,
-			value_reference = COALESCE($7, value_reference),
-			encrypted_value = CASE WHEN $8 THEN $9 ELSE encrypted_value END,
-			updated_at = NOW()
-		WHERE id = $1
-		RETURNING id, organization_id, description, registry, username, encrypted_value, value_provider_id, value_reference, created_at, updated_at
-	`, id, input.Description, input.Registry, input.Username, input.SetValueProviderID, input.ValueProviderID, input.ValueReference, input.SetEncryptedValue, input.EncryptedValue)
-	return scanImagePullSecret(row)
-}
-
-func (s *Store) DeleteImagePullSecret(ctx context.Context, id uuid.UUID) error {
-	var deletedID uuid.UUID
-	if err := s.pool.QueryRow(ctx, `DELETE FROM image_pull_secrets WHERE id = $1 RETURNING id`, id).Scan(&deletedID); err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return ErrImagePullSecretNotFound
-		}
-		return err
-	}
-	return nil
-}
-
-func (s *Store) ListImagePullSecrets(ctx context.Context, params ListImagePullSecretsParams) ([]ImagePullSecret, string, error) {
-	page, err := newPageParams(params.PageSize, params.PageToken)
-	if err != nil {
-		return nil, "", err
-	}
-
-	stmt := "SELECT id, organization_id, description, registry, username, encrypted_value, value_provider_id, value_reference, created_at, updated_at FROM image_pull_secrets"
-	stmt += " WHERE organization_id = $1 ORDER BY created_at DESC, id DESC LIMIT $2 OFFSET $3"
-	args := []any{params.OrganizationID, page.Limit + 1, page.Offset}
-
-	rows, err := s.pool.Query(ctx, stmt, args...)
-	if err != nil {
-		return nil, "", err
-	}
-	defer rows.Close()
-
-	secrets := make([]ImagePullSecret, 0, int(page.Limit))
-	for rows.Next() {
-		secret, err := scanImagePullSecret(rows)
-		if err != nil {
-			return nil, "", err
-		}
-		secrets = append(secrets, secret)
-	}
-	if rows.Err() != nil {
-		return nil, "", rows.Err()
-	}
-
-	secrets, nextToken, err := finalizePage(secrets, page)
-	if err != nil {
-		return nil, "", err
-	}
-
-	return secrets, nextToken, nil
-}
-
 func scanSecretProvider(row pgx.Row) (SecretProvider, error) {
 	var provider SecretProvider
 	if err := row.Scan(&provider.ID, &provider.OrganizationID, &provider.Title, &provider.Description, &provider.Type, &provider.Config, &provider.CreatedAt, &provider.UpdatedAt); err != nil {
@@ -441,33 +311,6 @@ func scanSecret(row pgx.Row) (Secret, error) {
 	if providerID.Valid {
 		id := uuid.UUID(providerID.Bytes)
 		secret.SecretProviderID = &id
-	}
-	return secret, nil
-}
-
-func scanImagePullSecret(row pgx.Row) (ImagePullSecret, error) {
-	var secret ImagePullSecret
-	var providerID pgtype.UUID
-	if err := row.Scan(
-		&secret.ID,
-		&secret.OrganizationID,
-		&secret.Description,
-		&secret.Registry,
-		&secret.Username,
-		&secret.EncryptedValue,
-		&providerID,
-		&secret.ValueReference,
-		&secret.CreatedAt,
-		&secret.UpdatedAt,
-	); err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return ImagePullSecret{}, ErrImagePullSecretNotFound
-		}
-		return ImagePullSecret{}, err
-	}
-	if providerID.Valid {
-		id := uuid.UUID(providerID.Bytes)
-		secret.ValueProviderID = &id
 	}
 	return secret, nil
 }
