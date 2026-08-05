@@ -31,11 +31,6 @@ type SecretStore interface {
 	UpdateSecret(ctx context.Context, id uuid.UUID, input store.UpdateSecretInput) (store.Secret, error)
 	DeleteSecret(ctx context.Context, id uuid.UUID) error
 	ListSecrets(ctx context.Context, params store.ListSecretsParams) ([]store.Secret, string, error)
-	CreateImagePullSecret(ctx context.Context, input store.CreateImagePullSecretInput) (store.ImagePullSecret, error)
-	GetImagePullSecret(ctx context.Context, id uuid.UUID) (store.ImagePullSecret, error)
-	UpdateImagePullSecret(ctx context.Context, id uuid.UUID, input store.UpdateImagePullSecretInput) (store.ImagePullSecret, error)
-	DeleteImagePullSecret(ctx context.Context, id uuid.UUID) error
-	ListImagePullSecrets(ctx context.Context, params store.ListImagePullSecretsParams) ([]store.ImagePullSecret, string, error)
 }
 
 type VaultResolver interface {
@@ -414,213 +409,6 @@ func (s *Server) ResolveSecretExists(ctx context.Context, req *secretsv1.Resolve
 	}, nil
 }
 
-func (s *Server) CreateImagePullSecret(ctx context.Context, req *secretsv1.CreateImagePullSecretRequest) (*secretsv1.CreateImagePullSecretResponse, error) {
-	organizationID, err := parseUUID(req.GetOrganizationId())
-	if err != nil {
-		return nil, status.Errorf(codes.InvalidArgument, "organization_id: %v", err)
-	}
-
-	registry := strings.TrimSpace(req.GetRegistry())
-	if registry == "" {
-		return nil, status.Error(codes.InvalidArgument, "registry must be provided")
-	}
-	username := strings.TrimSpace(req.GetUsername())
-	if username == "" {
-		return nil, status.Error(codes.InvalidArgument, "username must be provided")
-	}
-
-	var encryptedValue []byte
-	var providerID *uuid.UUID
-	valueReference := ""
-
-	switch src := req.GetSource().(type) {
-	case *secretsv1.CreateImagePullSecretRequest_Value:
-		valueBytes, err := crypto.Encrypt(s.encryptionKey, []byte(src.Value))
-		if err != nil {
-			return nil, status.Errorf(codes.Internal, "encrypt value: %v", err)
-		}
-		encryptedValue = valueBytes
-	case *secretsv1.CreateImagePullSecretRequest_Remote:
-		ref, err := parseRemoteSecretRef(src.Remote)
-		if err != nil {
-			return nil, status.Errorf(codes.InvalidArgument, "remote: %v", err)
-		}
-		providerID = &ref.ProviderID
-		valueReference = ref.Reference
-	default:
-		return nil, status.Error(codes.InvalidArgument, "value or remote must be provided")
-	}
-
-	secret, err := s.store.CreateImagePullSecret(ctx, store.CreateImagePullSecretInput{
-		OrganizationID:  organizationID,
-		Description:     req.GetDescription(),
-		Registry:        registry,
-		Username:        username,
-		EncryptedValue:  encryptedValue,
-		ValueProviderID: providerID,
-		ValueReference:  valueReference,
-	})
-	if err != nil {
-		return nil, toStatusError(err)
-	}
-
-	return &secretsv1.CreateImagePullSecretResponse{ImagePullSecret: toProtoImagePullSecret(secret)}, nil
-}
-
-func (s *Server) GetImagePullSecret(ctx context.Context, req *secretsv1.GetImagePullSecretRequest) (*secretsv1.GetImagePullSecretResponse, error) {
-	secretID, err := parseUUID(req.GetId())
-	if err != nil {
-		return nil, status.Errorf(codes.InvalidArgument, "id: %v", err)
-	}
-	secret, err := s.store.GetImagePullSecret(ctx, secretID)
-	if err != nil {
-		return nil, toStatusError(err)
-	}
-	return &secretsv1.GetImagePullSecretResponse{ImagePullSecret: toProtoImagePullSecret(secret)}, nil
-}
-
-func (s *Server) UpdateImagePullSecret(ctx context.Context, req *secretsv1.UpdateImagePullSecretRequest) (*secretsv1.UpdateImagePullSecretResponse, error) {
-	secretID, err := parseUUID(req.GetId())
-	if err != nil {
-		return nil, status.Errorf(codes.InvalidArgument, "id: %v", err)
-	}
-
-	var registry *string
-	if req.Registry != nil {
-		trimmed := strings.TrimSpace(req.GetRegistry())
-		if trimmed == "" {
-			return nil, status.Error(codes.InvalidArgument, "registry must be provided")
-		}
-		registry = &trimmed
-	}
-	var username *string
-	if req.Username != nil {
-		trimmed := strings.TrimSpace(req.GetUsername())
-		if trimmed == "" {
-			return nil, status.Error(codes.InvalidArgument, "username must be provided")
-		}
-		username = &trimmed
-	}
-
-	var providerID *uuid.UUID
-	var valueReference *string
-	var encryptedValue *[]byte
-	setProviderID := false
-	setEncryptedValue := false
-
-	switch src := req.GetSource().(type) {
-	case *secretsv1.UpdateImagePullSecretRequest_Value:
-		valueBytes, err := crypto.Encrypt(s.encryptionKey, []byte(src.Value))
-		if err != nil {
-			return nil, status.Errorf(codes.Internal, "encrypt value: %v", err)
-		}
-		encryptedValue = &valueBytes
-		setEncryptedValue = true
-		setProviderID = true
-		clearedReference := ""
-		valueReference = &clearedReference
-	case *secretsv1.UpdateImagePullSecretRequest_Remote:
-		ref, err := parseRemoteSecretRef(src.Remote)
-		if err != nil {
-			return nil, status.Errorf(codes.InvalidArgument, "remote: %v", err)
-		}
-		providerID = &ref.ProviderID
-		setProviderID = true
-		valueReferenceValue := ref.Reference
-		valueReference = &valueReferenceValue
-		setEncryptedValue = true
-		var cleared []byte
-		encryptedValue = &cleared
-	}
-
-	secret, err := s.store.UpdateImagePullSecret(ctx, secretID, store.UpdateImagePullSecretInput{
-		Description:        req.Description,
-		Registry:           registry,
-		Username:           username,
-		ValueProviderID:    providerID,
-		SetValueProviderID: setProviderID,
-		ValueReference:     valueReference,
-		EncryptedValue:     encryptedValue,
-		SetEncryptedValue:  setEncryptedValue,
-	})
-	if err != nil {
-		return nil, toStatusError(err)
-	}
-	return &secretsv1.UpdateImagePullSecretResponse{ImagePullSecret: toProtoImagePullSecret(secret)}, nil
-}
-
-func (s *Server) DeleteImagePullSecret(ctx context.Context, req *secretsv1.DeleteImagePullSecretRequest) (*secretsv1.DeleteImagePullSecretResponse, error) {
-	secretID, err := parseUUID(req.GetId())
-	if err != nil {
-		return nil, status.Errorf(codes.InvalidArgument, "id: %v", err)
-	}
-	if err := s.store.DeleteImagePullSecret(ctx, secretID); err != nil {
-		return nil, toStatusError(err)
-	}
-	return &secretsv1.DeleteImagePullSecretResponse{}, nil
-}
-
-func (s *Server) ListImagePullSecrets(ctx context.Context, req *secretsv1.ListImagePullSecretsRequest) (*secretsv1.ListImagePullSecretsResponse, error) {
-	organizationID, err := parseUUID(req.GetOrganizationId())
-	if err != nil {
-		return nil, status.Errorf(codes.InvalidArgument, "organization_id: %v", err)
-	}
-
-	params := store.ListImagePullSecretsParams{
-		OrganizationID: organizationID,
-		PageSize:       req.GetPageSize(),
-		PageToken:      req.GetPageToken(),
-	}
-
-	secrets, nextToken, err := s.store.ListImagePullSecrets(ctx, params)
-	if err != nil {
-		return nil, toStatusError(err)
-	}
-
-	resp := &secretsv1.ListImagePullSecretsResponse{
-		ImagePullSecrets: make([]*secretsv1.ImagePullSecret, len(secrets)),
-		NextPageToken:    nextToken,
-	}
-	for i, secret := range secrets {
-		resp.ImagePullSecrets[i] = toProtoImagePullSecret(secret)
-	}
-	return resp, nil
-}
-
-func (s *Server) ResolveImagePullSecret(ctx context.Context, req *secretsv1.ResolveImagePullSecretRequest) (*secretsv1.ResolveImagePullSecretResponse, error) {
-	secretID, err := parseUUID(req.GetId())
-	if err != nil {
-		return nil, status.Errorf(codes.InvalidArgument, "id: %v", err)
-	}
-	secret, err := s.store.GetImagePullSecret(ctx, secretID)
-	if err != nil {
-		return nil, toStatusError(err)
-	}
-	if len(secret.EncryptedValue) > 0 {
-		plaintext, err := crypto.Decrypt(s.encryptionKey, secret.EncryptedValue)
-		if err != nil {
-			return nil, status.Errorf(codes.Internal, "decrypt secret: %v", err)
-		}
-		return &secretsv1.ResolveImagePullSecretResponse{
-			Registry: secret.Registry,
-			Username: secret.Username,
-			Password: string(plaintext),
-		}, nil
-	}
-	if secret.ValueProviderID == nil {
-		return nil, status.Error(codes.FailedPrecondition, "image pull secret has no provider")
-	}
-	value, err := s.resolveVaultValue(ctx, *secret.ValueProviderID, secret.ValueReference)
-	if err != nil {
-		return nil, mapVaultResolveError(err, "value_reference")
-	}
-	return &secretsv1.ResolveImagePullSecretResponse{
-		Registry: secret.Registry,
-		Username: secret.Username,
-		Password: value,
-	}, nil
-}
-
 type vaultRemoteNameError struct {
 	err error
 }
@@ -753,24 +541,6 @@ func toProtoSecret(secret store.Secret) *secretsv1.Secret {
 	}
 }
 
-func toProtoImagePullSecret(secret store.ImagePullSecret) *secretsv1.ImagePullSecret {
-	protoSecret := &secretsv1.ImagePullSecret{
-		Meta:        toProtoEntityMeta(secret.ID, secret.CreatedAt, secret.UpdatedAt),
-		Description: secret.Description,
-		Registry:    secret.Registry,
-		Username:    secret.Username,
-	}
-	if secret.ValueProviderID != nil {
-		protoSecret.Source = &secretsv1.ImagePullSecret_Remote{
-			Remote: &secretsv1.RemoteSecretRef{
-				ValueProviderId: secret.ValueProviderID.String(),
-				ValueReference:  secret.ValueReference,
-			},
-		}
-	}
-	return protoSecret
-}
-
 func toProtoEntityMeta(id uuid.UUID, createdAt, updatedAt time.Time) *secretsv1.EntityMeta {
 	return &secretsv1.EntityMeta{
 		Id:        id.String(),
@@ -878,7 +648,7 @@ func toStatusError(err error) error {
 		return status.Error(codes.FailedPrecondition, pgErr.Message)
 	}
 	switch {
-	case errors.Is(err, store.ErrSecretProviderNotFound), errors.Is(err, store.ErrSecretNotFound), errors.Is(err, store.ErrImagePullSecretNotFound):
+	case errors.Is(err, store.ErrSecretProviderNotFound), errors.Is(err, store.ErrSecretNotFound):
 		return status.Error(codes.NotFound, err.Error())
 	case errors.Is(err, store.ErrInvalidPageToken):
 		return status.Error(codes.InvalidArgument, err.Error())
