@@ -67,6 +67,14 @@ func run() error {
 		defer egressRulesConn.Close()
 	}
 	secretsServer.WithEgressRulesClient(egressRulesClient)
+	llmClient, llmConn, err := server.DialLLMClient(ctx, cfg.LLMGRPCTarget)
+	if err != nil {
+		return err
+	}
+	if llmConn != nil {
+		defer llmConn.Close()
+	}
+	secretsServer.WithLLMClient(llmClient)
 	secretsv1.RegisterSecretsServiceServer(grpcServer, secretsServer)
 
 	lis, err := net.Listen("tcp", cfg.GRPCAddress)

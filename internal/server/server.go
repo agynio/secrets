@@ -42,11 +42,17 @@ type Server struct {
 	store         SecretStore
 	vault         VaultResolver
 	egressRules   EgressRulesClient
+	llm           LLMClient
 	encryptionKey []byte
 }
 
 func New(store SecretStore, vaultClient VaultResolver, encryptionKey []byte) *Server {
 	return &Server{store: store, vault: vaultClient, encryptionKey: encryptionKey}
+}
+
+func (s *Server) WithLLMClient(client LLMClient) *Server {
+	s.llm = client
+	return s
 }
 
 func (s *Server) WithEgressRulesClient(client EgressRulesClient) *Server {
@@ -302,13 +308,51 @@ func (s *Server) DeleteSecret(ctx context.Context, req *secretsv1.DeleteSecretRe
 	if err != nil {
 		return nil, status.Errorf(codes.InvalidArgument, "id: %v", err)
 	}
-	if err := s.ensureSecretNotReferencedByEgressRules(ctx, secretID); err != nil {
+	if err := s.ensureSecretUnreferenced(ctx, secretID); err != nil {
 		return nil, err
 	}
 	if err := s.store.DeleteSecret(ctx, secretID); err != nil {
 		return nil, toStatusError(err)
 	}
 	return &secretsv1.DeleteSecretResponse{}, nil
+}
+
+// ensureSecretUnreferenced refuses a delete the secret is not free for, and
+// reports every class of reference in one error: an operator who deletes the
+// egress rule only to be refused again for a subscription has been told half
+// the truth. A reference check that cannot run is also a refusal -- an
+// unverifiable secret is not a deletable one -- but known blockers are named
+// first, since they are the actionable answer.
+func (s *Server) ensureSecretUnreferenced(ctx context.Context, secretID uuid.UUID) error {
+	var blockers []string
+	var unverifiable []string
+
+	if s.egressRules == nil {
+		unverifiable = append(unverifiable, "egress rule")
+	} else if refs, err := s.egressRules.CountRulesReferencingSecret(ctx, secretID.String()); err != nil {
+		unverifiable = append(unverifiable, fmt.Sprintf("egress rule (%v)", err))
+	} else if refs.Count > 0 {
+		sort.Strings(refs.EgressRuleIDs)
+		blockers = append(blockers, fmt.Sprintf("%d egress rule(s): %s", refs.Count, strings.Join(refs.EgressRuleIDs, ", ")))
+	}
+
+	if s.llm == nil {
+		unverifiable = append(unverifiable, "subscription")
+	} else if refs, err := s.llm.CountSubscriptionsReferencingSecret(ctx, secretID.String()); err != nil {
+		unverifiable = append(unverifiable, fmt.Sprintf("subscription (%v)", err))
+	} else if refs.Count > 0 {
+		sort.Strings(refs.SubscriptionIDs)
+		blockers = append(blockers, fmt.Sprintf("%d subscription(s): %s", refs.Count, strings.Join(refs.SubscriptionIDs, ", ")))
+	}
+
+	if len(blockers) > 0 {
+		return status.Errorf(codes.FailedPrecondition, "secret is referenced by %s", strings.Join(blockers, "; "))
+	}
+	if len(unverifiable) > 0 {
+		return status.Errorf(codes.FailedPrecondition,
+			"cannot verify %s references for secret deletion", strings.Join(unverifiable, " and "))
+	}
+	return nil
 }
 
 func (s *Server) ensureSecretNotReferencedByEgressRules(ctx context.Context, secretID uuid.UUID) error {

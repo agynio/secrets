@@ -303,6 +303,22 @@ func (f *fakeEgressRulesClient) CountRulesReferencingSecret(_ context.Context, s
 	return f.references, nil
 }
 
+type fakeLLMClient struct {
+	references SubscriptionSecretReferences
+	err        error
+	secretID   string
+	called     bool
+}
+
+func (f *fakeLLMClient) CountSubscriptionsReferencingSecret(_ context.Context, secretID string) (SubscriptionSecretReferences, error) {
+	f.called = true
+	f.secretID = secretID
+	if f.err != nil {
+		return SubscriptionSecretReferences{}, f.err
+	}
+	return f.references, nil
+}
+
 func TestResolveSecretExists(t *testing.T) {
 	secretID := uuid.New()
 	organizationID := uuid.New()
@@ -337,7 +353,7 @@ func TestDeleteSecretEgressReferenceCheck(t *testing.T) {
 	t.Run("allows unreferenced delete", func(t *testing.T) {
 		egressClient := &fakeEgressRulesClient{}
 		store := &fakeSecretStore{}
-		_, err := (&Server{store: store, egressRules: egressClient}).DeleteSecret(context.Background(), &secretsv1.DeleteSecretRequest{Id: secretID.String()})
+		_, err := (&Server{store: store, egressRules: egressClient, llm: &fakeLLMClient{}}).DeleteSecret(context.Background(), &secretsv1.DeleteSecretRequest{Id: secretID.String()})
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -355,7 +371,7 @@ func TestDeleteSecretEgressReferenceCheck(t *testing.T) {
 	t.Run("rejects referenced delete", func(t *testing.T) {
 		egressClient := &fakeEgressRulesClient{references: EgressSecretReferences{Count: 2, EgressRuleIDs: []string{"rule-b", "rule-a"}}}
 		store := &fakeSecretStore{}
-		_, err := (&Server{store: store, egressRules: egressClient}).DeleteSecret(context.Background(), &secretsv1.DeleteSecretRequest{Id: secretID.String()})
+		_, err := (&Server{store: store, egressRules: egressClient, llm: &fakeLLMClient{}}).DeleteSecret(context.Background(), &secretsv1.DeleteSecretRequest{Id: secretID.String()})
 		assertStatusCode(t, err, codes.FailedPrecondition)
 		if store.deletedSecretID != uuid.Nil {
 			t.Fatalf("secret should not be deleted")
@@ -374,10 +390,55 @@ func TestDeleteSecretEgressReferenceCheck(t *testing.T) {
 		}
 	})
 
+	t.Run("rejects delete referenced by a subscription", func(t *testing.T) {
+		llmClient := &fakeLLMClient{references: SubscriptionSecretReferences{Count: 1, SubscriptionIDs: []string{"sub-a"}}}
+		store := &fakeSecretStore{}
+		_, err := (&Server{store: store, egressRules: &fakeEgressRulesClient{}, llm: llmClient}).DeleteSecret(context.Background(), &secretsv1.DeleteSecretRequest{Id: secretID.String()})
+		assertStatusCode(t, err, codes.FailedPrecondition)
+		if store.deletedSecretID != uuid.Nil {
+			t.Fatalf("secret should not be deleted")
+		}
+		if !strings.Contains(err.Error(), "sub-a") {
+			t.Fatalf("expected the referencing subscription in the error, got %v", err)
+		}
+	})
+
+	// Both classes at once: deleting the egress rule and being refused again for
+	// a subscription is a worse experience than one complete answer.
+	t.Run("names every class of reference at once", func(t *testing.T) {
+		egressClient := &fakeEgressRulesClient{references: EgressSecretReferences{Count: 1, EgressRuleIDs: []string{"rule-a"}}}
+		llmClient := &fakeLLMClient{references: SubscriptionSecretReferences{Count: 1, SubscriptionIDs: []string{"sub-a"}}}
+		_, err := (&Server{store: &fakeSecretStore{}, egressRules: egressClient, llm: llmClient}).DeleteSecret(context.Background(), &secretsv1.DeleteSecretRequest{Id: secretID.String()})
+		assertStatusCode(t, err, codes.FailedPrecondition)
+		if !strings.Contains(err.Error(), "rule-a") || !strings.Contains(err.Error(), "sub-a") {
+			t.Fatalf("expected both classes named, got %v", err)
+		}
+	})
+
+	// An unverifiable class is still a refusal, but a known blocker is the
+	// actionable answer and comes first.
+	t.Run("names known blockers even when another check cannot run", func(t *testing.T) {
+		egressClient := &fakeEgressRulesClient{references: EgressSecretReferences{Count: 1, EgressRuleIDs: []string{"rule-a"}}}
+		_, err := (&Server{store: &fakeSecretStore{}, egressRules: egressClient}).DeleteSecret(context.Background(), &secretsv1.DeleteSecretRequest{Id: secretID.String()})
+		assertStatusCode(t, err, codes.FailedPrecondition)
+		if !strings.Contains(err.Error(), "rule-a") {
+			t.Fatalf("expected the known blocker named, got %v", err)
+		}
+	})
+
+	t.Run("fails closed without a subscription client", func(t *testing.T) {
+		store := &fakeSecretStore{}
+		_, err := (&Server{store: store, egressRules: &fakeEgressRulesClient{}}).DeleteSecret(context.Background(), &secretsv1.DeleteSecretRequest{Id: secretID.String()})
+		assertStatusCode(t, err, codes.FailedPrecondition)
+		if store.deletedSecretID != uuid.Nil {
+			t.Fatalf("secret should not be deleted")
+		}
+	})
+
 	t.Run("fails closed on check error", func(t *testing.T) {
 		egressClient := &fakeEgressRulesClient{err: errors.New("unavailable")}
 		store := &fakeSecretStore{}
-		_, err := (&Server{store: store, egressRules: egressClient}).DeleteSecret(context.Background(), &secretsv1.DeleteSecretRequest{Id: secretID.String()})
+		_, err := (&Server{store: store, egressRules: egressClient, llm: &fakeLLMClient{}}).DeleteSecret(context.Background(), &secretsv1.DeleteSecretRequest{Id: secretID.String()})
 		assertStatusCode(t, err, codes.FailedPrecondition)
 		if store.deletedSecretID != uuid.Nil {
 			t.Fatalf("secret should not be deleted")

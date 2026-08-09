@@ -10,6 +10,7 @@ type Config struct {
 	DatabaseURL           string
 	EncryptionKeyFile     string
 	EgressRulesGRPCTarget string
+	LLMGRPCTarget         string
 }
 
 func FromEnv() (Config, error) {
@@ -27,5 +28,6 @@ func FromEnv() (Config, error) {
 		return Config{}, fmt.Errorf("ENCRYPTION_KEY_FILE must be set")
 	}
 	cfg.EgressRulesGRPCTarget = os.Getenv("EGRESS_RULES_GRPC_TARGET")
+	cfg.LLMGRPCTarget = os.Getenv("LLM_GRPC_TARGET")
 	return cfg, nil
 }
