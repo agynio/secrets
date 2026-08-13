@@ -11,6 +11,7 @@ type Config struct {
 	EncryptionKeyFile     string
 	EgressRulesGRPCTarget string
 	LLMGRPCTarget         string
+	ImagesGRPCTarget      string
 }
 
 func FromEnv() (Config, error) {
@@ -29,5 +30,6 @@ func FromEnv() (Config, error) {
 	}
 	cfg.EgressRulesGRPCTarget = os.Getenv("EGRESS_RULES_GRPC_TARGET")
 	cfg.LLMGRPCTarget = os.Getenv("LLM_GRPC_TARGET")
+	cfg.ImagesGRPCTarget = os.Getenv("IMAGES_GRPC_TARGET")
 	return cfg, nil
 }

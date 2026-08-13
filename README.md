@@ -33,6 +33,8 @@ go run ./cmd/secrets
 | `GRPC_ADDRESS` | No | `:50051` | Address for the gRPC server to listen on. |
 | `ENCRYPTION_KEY_FILE` | Yes | - | Path to the encryption key file used for local secret values. |
 | `EGRESS_RULES_GRPC_TARGET` | No | - | EgressRules gRPC target used to fail-closed on `DeleteSecret` when egress rules reference a secret. |
+| `LLM_GRPC_TARGET` | No | - | LLM gRPC target, same purpose for subscriptions holding a secret by reference. |
+| `IMAGES_GRPC_TARGET` | No | - | Images gRPC target, same purpose for images naming a secret as their registry credential. |
 
 ## Repository Layout
 

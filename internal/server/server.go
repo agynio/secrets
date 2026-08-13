@@ -43,6 +43,7 @@ type Server struct {
 	vault         VaultResolver
 	egressRules   EgressRulesClient
 	llm           LLMClient
+	images        ImagesClient
 	encryptionKey []byte
 }
 
@@ -52,6 +53,11 @@ func New(store SecretStore, vaultClient VaultResolver, encryptionKey []byte) *Se
 
 func (s *Server) WithLLMClient(client LLMClient) *Server {
 	s.llm = client
+	return s
+}
+
+func (s *Server) WithImagesClient(client ImagesClient) *Server {
+	s.images = client
 	return s
 }
 
@@ -343,6 +349,15 @@ func (s *Server) ensureSecretUnreferenced(ctx context.Context, secretID uuid.UUI
 	} else if refs.Count > 0 {
 		sort.Strings(refs.SubscriptionIDs)
 		blockers = append(blockers, fmt.Sprintf("%d subscription(s): %s", refs.Count, strings.Join(refs.SubscriptionIDs, ", ")))
+	}
+
+	if s.images == nil {
+		unverifiable = append(unverifiable, "image")
+	} else if refs, err := s.images.CountImagesReferencingSecret(ctx, secretID.String()); err != nil {
+		unverifiable = append(unverifiable, fmt.Sprintf("image (%v)", err))
+	} else if refs.Count > 0 {
+		sort.Strings(refs.ImageIDs)
+		blockers = append(blockers, fmt.Sprintf("%d image(s): %s", refs.Count, strings.Join(refs.ImageIDs, ", ")))
 	}
 
 	if len(blockers) > 0 {
