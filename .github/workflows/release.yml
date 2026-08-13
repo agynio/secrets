@@ -60,7 +60,7 @@ jobs:
 
       - name: Generate protobuf stubs
         run: |
-          buf generate buf.build/agynio/api --path agynio/api/egress/v1 --path agynio/api/secrets/v1 --path agynio/api/llm/v1
+          make proto
 
       - name: Build and push secrets image
         uses: docker/build-push-action@v6
