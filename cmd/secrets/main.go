@@ -75,6 +75,14 @@ func run() error {
 		defer llmConn.Close()
 	}
 	secretsServer.WithLLMClient(llmClient)
+	imagesClient, imagesConn, err := server.DialImagesClient(ctx, cfg.ImagesGRPCTarget)
+	if err != nil {
+		return err
+	}
+	if imagesConn != nil {
+		defer imagesConn.Close()
+	}
+	secretsServer.WithImagesClient(imagesClient)
 	secretsv1.RegisterSecretsServiceServer(grpcServer, secretsServer)
 
 	lis, err := net.Listen("tcp", cfg.GRPCAddress)

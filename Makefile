@@ -5,7 +5,7 @@ SHELL := /bin/bash
 all: build
 
 proto:
-	buf generate buf.build/agynio/api --path agynio/api/egress/v1 --path agynio/api/secrets/v1
+	buf generate buf.build/agynio/api --path agynio/api/egress/v1 --path agynio/api/llm/v1 --path agynio/api/secrets/v1 --path agynio/api/images/v1
 
 build:
 	GOFLAGS=-mod=mod go build ./...
