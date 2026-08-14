@@ -32,9 +32,11 @@ go run ./cmd/secrets
 | `DATABASE_URL` | Yes | - | PostgreSQL connection string. |
 | `GRPC_ADDRESS` | No | `:50051` | Address for the gRPC server to listen on. |
 | `ENCRYPTION_KEY_FILE` | Yes | - | Path to the encryption key file used for local secret values. |
-| `EGRESS_RULES_GRPC_TARGET` | No | - | EgressRules gRPC target used to fail-closed on `DeleteSecret` when egress rules reference a secret. |
-| `LLM_GRPC_TARGET` | No | - | LLM gRPC target, same purpose for subscriptions holding a secret by reference. |
-| `IMAGES_GRPC_TARGET` | No | - | Images gRPC target, same purpose for images naming a secret as their registry credential. |
+| `EGRESS_RULES_GRPC_TARGET` | No | `egress:50051` | EgressRules gRPC target, asked before `DeleteSecret` whether a rule references the secret. |
+| `LLM_GRPC_TARGET` | No | `llm:50051` | LLM gRPC target, same question for subscriptions holding a secret by reference. |
+| `IMAGES_GRPC_TARGET` | No | `images:50051` | Images gRPC target, same question for images naming a secret as their registry credential. |
+
+The three targets default to each peer's name in its own namespace, which is where they are. Set one only to point somewhere else.
 
 ## Repository Layout
 
