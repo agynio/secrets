@@ -278,6 +278,46 @@ func (s *Store) ListSecrets(ctx context.Context, params ListSecretsParams) ([]Se
 	return secrets, nextToken, nil
 }
 
+// ListSecretIDsByOrganization returns every secret the organization holds,
+// unpaginated: a teardown wants all of them, not a page at a time.
+func (s *Store) ListSecretIDsByOrganization(ctx context.Context, organizationID uuid.UUID) ([]uuid.UUID, error) {
+	rows, err := s.pool.Query(ctx, `SELECT id FROM secrets WHERE organization_id = $1`, organizationID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	ids := []uuid.UUID{}
+	for rows.Next() {
+		var id uuid.UUID
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return ids, nil
+}
+
+// DeleteImagePullSecretsByOrganization clears the legacy image_pull_secrets
+// rows. Nothing in this service reads that table any more -- an image names its
+// registry credential by secret id -- but the rows are org-scoped, and rows
+// outliving their organization are what the teardown exists to prevent.
+func (s *Store) DeleteImagePullSecretsByOrganization(ctx context.Context, organizationID uuid.UUID) error {
+	_, err := s.pool.Exec(ctx, `DELETE FROM image_pull_secrets WHERE organization_id = $1`, organizationID)
+	return err
+}
+
+// DeleteSecretProvidersByOrganization removes the organization's providers. The
+// secrets and image pull secrets that reference them are ON DELETE RESTRICT, so
+// this only succeeds once both are gone.
+func (s *Store) DeleteSecretProvidersByOrganization(ctx context.Context, organizationID uuid.UUID) error {
+	_, err := s.pool.Exec(ctx, `DELETE FROM secret_providers WHERE organization_id = $1`, organizationID)
+	return err
+}
+
 func scanSecretProvider(row pgx.Row) (SecretProvider, error) {
 	var provider SecretProvider
 	if err := row.Scan(&provider.ID, &provider.OrganizationID, &provider.Title, &provider.Description, &provider.Type, &provider.Config, &provider.CreatedAt, &provider.UpdatedAt); err != nil {
