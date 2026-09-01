@@ -31,6 +31,9 @@ type SecretStore interface {
 	UpdateSecret(ctx context.Context, id uuid.UUID, input store.UpdateSecretInput) (store.Secret, error)
 	DeleteSecret(ctx context.Context, id uuid.UUID) error
 	ListSecrets(ctx context.Context, params store.ListSecretsParams) ([]store.Secret, string, error)
+	ListSecretIDsByOrganization(ctx context.Context, organizationID uuid.UUID) ([]uuid.UUID, error)
+	DeleteImagePullSecretsByOrganization(ctx context.Context, organizationID uuid.UUID) error
+	DeleteSecretProvidersByOrganization(ctx context.Context, organizationID uuid.UUID) error
 }
 
 type VaultResolver interface {
@@ -714,4 +717,46 @@ func toStatusError(err error) error {
 	default:
 		return status.Errorf(codes.Internal, "internal error: %v", err)
 	}
+}
+
+// DeleteOrganizationResources removes the organization's secrets, its legacy
+// image pull secrets, and its secret providers, in that order -- both of the
+// first two reference a provider ON DELETE RESTRICT. It is internal: Istio
+// settles who may call it, so there is no permission check and no caller
+// identity to check against. Step 6 of the organization teardown.
+//
+// The reference check on each secret is deliberately kept. A secret an image,
+// subscription, or egress rule still names is not free to delete, and the
+// teardown reaches this step only once those are gone -- so a refusal here
+// means the cascade ran out of order, which is worth surfacing as a stalled
+// step rather than hiding behind a delete that skips its own invariants.
+//
+// Secret values in the external store the provider names are not touched. The
+// platform deletes its reference to them, not the credential.
+func (s *Server) DeleteOrganizationResources(ctx context.Context, req *secretsv1.DeleteOrganizationResourcesRequest) (*secretsv1.DeleteOrganizationResourcesResponse, error) {
+	organizationID, err := parseUUID(req.GetOrganizationId())
+	if err != nil {
+		return nil, status.Errorf(codes.InvalidArgument, "organization_id: %v", err)
+	}
+
+	secretIDs, err := s.store.ListSecretIDsByOrganization(ctx, organizationID)
+	if err != nil {
+		return nil, toStatusError(err)
+	}
+	for _, secretID := range secretIDs {
+		if err := s.ensureSecretUnreferenced(ctx, secretID); err != nil {
+			return nil, err
+		}
+		if err := s.store.DeleteSecret(ctx, secretID); err != nil {
+			return nil, toStatusError(err)
+		}
+	}
+
+	if err := s.store.DeleteImagePullSecretsByOrganization(ctx, organizationID); err != nil {
+		return nil, toStatusError(err)
+	}
+	if err := s.store.DeleteSecretProvidersByOrganization(ctx, organizationID); err != nil {
+		return nil, toStatusError(err)
+	}
+	return &secretsv1.DeleteOrganizationResourcesResponse{}, nil
 }

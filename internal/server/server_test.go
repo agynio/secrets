@@ -238,9 +238,13 @@ func TestParseRemoteSecretRef(t *testing.T) {
 }
 
 type fakeSecretStore struct {
-	getSecret       store.Secret
-	getSecretErr    error
-	deletedSecretID uuid.UUID
+	getSecret          store.Secret
+	getSecretErr       error
+	deletedSecretID    uuid.UUID
+	organizationSecret []uuid.UUID
+	deletedSecretIDs   []uuid.UUID
+	deletedPullSecrets []uuid.UUID
+	deletedProviders   []uuid.UUID
 }
 
 func (f fakeSecretStore) CreateSecretProvider(context.Context, store.CreateSecretProviderInput) (store.SecretProvider, error) {
@@ -280,6 +284,21 @@ func (f fakeSecretStore) UpdateSecret(context.Context, uuid.UUID, store.UpdateSe
 
 func (f *fakeSecretStore) DeleteSecret(_ context.Context, id uuid.UUID) error {
 	f.deletedSecretID = id
+	f.deletedSecretIDs = append(f.deletedSecretIDs, id)
+	return nil
+}
+
+func (f *fakeSecretStore) ListSecretIDsByOrganization(context.Context, uuid.UUID) ([]uuid.UUID, error) {
+	return f.organizationSecret, nil
+}
+
+func (f *fakeSecretStore) DeleteImagePullSecretsByOrganization(_ context.Context, organizationID uuid.UUID) error {
+	f.deletedPullSecrets = append(f.deletedPullSecrets, organizationID)
+	return nil
+}
+
+func (f *fakeSecretStore) DeleteSecretProvidersByOrganization(_ context.Context, organizationID uuid.UUID) error {
+	f.deletedProviders = append(f.deletedProviders, organizationID)
 	return nil
 }
 
@@ -500,4 +519,55 @@ func assertStatusCode(t *testing.T, err error, want codes.Code) {
 	if st.Code() != want {
 		t.Fatalf("expected code %v, got %v", want, st.Code())
 	}
+}
+
+func TestDeleteOrganizationResourcesRemovesSecretsThenProviders(t *testing.T) {
+	organizationID := uuid.New()
+	first, second := uuid.New(), uuid.New()
+	fake := &fakeSecretStore{organizationSecret: []uuid.UUID{first, second}}
+	server := &Server{store: fake, egressRules: &fakeEgressRulesClient{}, llm: &fakeLLMClient{}, images: &fakeImagesClient{}}
+
+	// Internal RPC: no identity in the context, and none required.
+	_, err := server.DeleteOrganizationResources(context.Background(), &secretsv1.DeleteOrganizationResourcesRequest{
+		OrganizationId: organizationID.String(),
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(fake.deletedSecretIDs) != 2 {
+		t.Fatalf("expected both secrets deleted, got %v", fake.deletedSecretIDs)
+	}
+	// Providers last: secrets and image pull secrets reference them ON DELETE
+	// RESTRICT, so the provider delete only succeeds once both are gone.
+	if len(fake.deletedPullSecrets) != 1 || len(fake.deletedProviders) != 1 {
+		t.Fatalf("expected pull secrets and providers cleared once, got %v and %v", fake.deletedPullSecrets, fake.deletedProviders)
+	}
+}
+
+func TestDeleteOrganizationResourcesStopsOnReferencedSecret(t *testing.T) {
+	// A secret an image still names means the cascade reached this step out of
+	// order. Surfacing it as a stalled step beats deleting past the invariant.
+	fake := &fakeSecretStore{organizationSecret: []uuid.UUID{uuid.New()}}
+	server := &Server{
+		store:       fake,
+		egressRules: &fakeEgressRulesClient{},
+		llm:         &fakeLLMClient{},
+		images:      &fakeImagesClient{references: ImageSecretReferences{Count: 1, ImageIDs: []string{"image-a"}}},
+	}
+
+	_, err := server.DeleteOrganizationResources(context.Background(), &secretsv1.DeleteOrganizationResourcesRequest{
+		OrganizationId: uuid.New().String(),
+	})
+	assertStatusCode(t, err, codes.FailedPrecondition)
+	if len(fake.deletedProviders) != 0 {
+		t.Fatalf("expected providers untouched when a secret is still referenced, got %v", fake.deletedProviders)
+	}
+}
+
+func TestDeleteOrganizationResourcesRejectsInvalidOrganizationID(t *testing.T) {
+	server := &Server{store: &fakeSecretStore{}}
+	_, err := server.DeleteOrganizationResources(context.Background(), &secretsv1.DeleteOrganizationResourcesRequest{
+		OrganizationId: "not-a-uuid",
+	})
+	assertStatusCode(t, err, codes.InvalidArgument)
 }
